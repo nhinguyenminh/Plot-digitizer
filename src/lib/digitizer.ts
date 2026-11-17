@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'crop'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'trace-region' | 'crop'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
@@ -67,10 +67,23 @@ export function csvForDataset(dataset: Dataset, xAxis: AxisCalibration, yAxis: A
   return ['x,y', ...sorted.map((point) => `${Number(point.x.toPrecision(8))},${Number(point.y.toPrecision(8))}`)].join('\n')
 }
 
-export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: number, step: number): PixelPoint[] {
+export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: number, step: number, guide?: PixelPoint[], guideRadius = 16): PixelPoint[] {
   const { width, height, data } = imageData
   const sx = Math.max(0, Math.min(width - 1, Math.round(seed.x)))
-  const sy = Math.max(0, Math.min(height - 1, Math.round(seed.y)))
+  const sortedGuide = guide?.length ? [...guide].sort((a, b) => a.x - b.x) : null
+  const guideAt = (x: number) => {
+    if (!sortedGuide?.length) return null
+    if (x <= sortedGuide[0].x) return sortedGuide[0]
+    if (x >= sortedGuide[sortedGuide.length - 1].x) return sortedGuide[sortedGuide.length - 1]
+    const index = sortedGuide.findIndex((point, pointIndex) => pointIndex < sortedGuide.length - 1 && x >= point.x && x <= sortedGuide[pointIndex + 1].x)
+    const start = sortedGuide[index]
+    const end = sortedGuide[index + 1]
+    if (Math.abs(end.x - start.x) < 1e-8) return start
+    const ratio = (x - start.x) / (end.x - start.x)
+    return { x, y: start.y + (end.y - start.y) * ratio }
+  }
+  const nearestGuide = sortedGuide?.reduce((best, point) => Math.abs(point.x - sx) < Math.abs(best.x - sx) ? point : best)
+  const sy = Math.max(0, Math.min(height - 1, Math.round(nearestGuide?.y ?? seed.y)))
   const seedOffset = (sy * width + sx) * 4
   const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
   const stride = Math.max(1, Math.round(step))
@@ -80,7 +93,10 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
     for (let x = sx + direction * stride; x >= 0 && x < width; x += direction * stride) {
       const last = points[points.length - 1]
       const previous = points.length > 1 ? points[points.length - 2] : null
-      const slope = previous ? (last.y - previous.y) / (last.x - previous.x) : 0
+      const guideNext = guideAt(x)
+      const guidePrevious = guideAt(last.x)
+      const guidedSlope = guideNext && guidePrevious && x !== last.x ? (guideNext.y - guidePrevious.y) / (x - last.x) : 0
+      const slope = previous ? (last.y - previous.y) / (last.x - previous.x) : guidedSlope
       const baseRadius = Math.min(
         Math.max(12, Math.round(height * 0.08)) + Math.ceil(Math.abs(slope * stride)),
         Math.max(12, Math.round(height * 0.2)),
@@ -90,15 +106,17 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
       const curvature = older ? (slope - previousSlope) / (last.x - older.x) : 0
       const dx = x - last.x
       const curveCorrection = Math.max(-baseRadius / 2, Math.min(baseRadius / 2, curvature * dx * dx / 2))
-      const predictedY = last.y + slope * dx + curveCorrection
-      const radius = baseRadius
+      const predictedY = guideNext
+        ? guideNext.y
+        : last.y + slope * dx + curveCorrection
+      const radius = guideNext ? Math.max(3, Math.round(guideRadius)) : baseRadius
       let best: PixelPoint | null = null
       let bestScore = Infinity
       for (let y = Math.max(0, Math.round(predictedY) - radius); y <= Math.min(height - 1, Math.round(predictedY) + radius); y++) {
         const index = (y * width + x) * 4
         const distance = Math.hypot(data[index] - target[0], data[index + 1] - target[1], data[index + 2] - target[2])
         if (distance > tolerance) continue
-        const score = distance + Math.abs(y - predictedY) * 0.8
+        const score = distance + Math.abs(y - predictedY) * (guideNext ? 1.5 : 0.8)
         if (score < bestScore) {
           bestScore = score
           best = { x, y }

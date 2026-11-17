@@ -63,7 +63,8 @@ const modeLabels: Record<ToolMode, string> = {
   select: 'Select', 'calibrate-x': 'Set X calibration', 'calibrate-y': 'Set Y calibration',
   'calibrate-four': 'Four-point calibration', 'calibrate-edit': 'Modify calibration',
   point: 'Add data points', 'point-edit': 'Modify curve points',
-  surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance', trace: 'Seed auto-trace', crop: 'Crop image',
+  surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance',
+  trace: 'Find curve from seed', 'trace-region': 'Paint curve region', crop: 'Crop image',
 }
 
 export default function App() {
@@ -92,6 +93,9 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(3)
+  const [traceBrushWidth, setTraceBrushWidth] = useState(24)
+  const [calibrationMarkerColor, setCalibrationMarkerColor] = useState('#36d399')
+  const [calibrationConfirmed, setCalibrationConfirmed] = useState(false)
   const [sortBy, setSortBy] = useState<'x' | 'y'>('x')
   const [precision, setPrecision] = useState(6)
   const [seedColor, setSeedColor] = useState<[number, number, number]>([72, 215, 191])
@@ -231,6 +235,7 @@ export default function App() {
           { x: left, y: bottom, value: values[3] },
         ],
       })
+      setCalibrationConfirmed(false)
       setGridDetection(detected)
       setMode('calibrate-edit')
       showNotice(`Detected ${detected.verticalLines.length} vertical and ${detected.horizontalLines.length} horizontal grid lines. Check the highlighted calibration points and adjust them if needed.`)
@@ -254,6 +259,7 @@ export default function App() {
   const updateCalibrationPoint = (axis: 'x' | 'y', index: number, point: PixelPoint) => {
     const update = axis === 'x' ? setXAxis : setYAxis
     update((current) => ({ ...current, points: current.points.map((calPoint, pointIndex) => pointIndex === index ? { ...calPoint, ...point } : calPoint) }))
+    setCalibrationConfirmed(false)
   }
   const updateCalibrationValue = (axis: 'x' | 'y', index: number, rawValue: string) => {
     const calibration = axis === 'x' ? xAxis : yAxis
@@ -261,6 +267,7 @@ export default function App() {
     if (!Number.isFinite(value) || (calibration.scale === 'log' && value <= 0) || (calibration.scale === 'inverse' && value === 0)) return
     const update = axis === 'x' ? setXAxis : setYAxis
     update((current) => ({ ...current, points: current.points.map((point, pointIndex) => pointIndex === index ? { ...point, value } : point) }))
+    setCalibrationConfirmed(false)
   }
   const updateCompressorAxis = (axis: 'x' | 'y', patch: Partial<CompressorAxisConfig>) => setCompressorAxes((current) => ({
     ...current,
@@ -273,6 +280,78 @@ export default function App() {
     setDatasets((current) => [...current, next])
     setActiveId(next.id)
     setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : selectedKind === 'efficiency' ? 'trace' : 'point')
+  }
+
+  const traceCurve = async (seed: PixelPoint, guide?: PixelPoint[]) => {
+    if (!imageUrl || !imagePrepared) return
+    const traceMode = mode
+    setLoading(true)
+    try {
+      const image = new Image()
+      image.src = imageUrl
+      await image.decode()
+      const canvas = document.createElement('canvas')
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      const context = canvas.getContext('2d', { willReadFrequently: true })
+      if (!context) throw new Error('This browser cannot analyze the plot image.')
+      context.drawImage(image, 0, 0)
+      let traced = traceColor(
+        context.getImageData(0, 0, canvas.width, canvas.height),
+        seed,
+        tolerance,
+        sampleStep,
+        guide,
+        traceBrushWidth / 2,
+      )
+      const tracingSpeedLine = traceMode === 'speed' || (traceMode === 'trace-region' && activeDataset?.kind === 'speed')
+      if (tracingSpeedLine) {
+        const boundaries = datasets.filter((dataset) => (dataset.kind === 'surge' || dataset.kind === 'choke') && dataset.points.length > 1)
+        const meetsBoundary = (candidate: PixelPoint) => boundaries.some((line) => line.points.slice(1).some((end, index) => distanceToSegment(candidate, line.points[index], end) < 10))
+        const seedIndex = traced.reduce((best, candidate, index) => Math.hypot(candidate.x - seed.x, candidate.y - seed.y) < Math.hypot(traced[best].x - seed.x, traced[best].y - seed.y) ? index : best, 0)
+        const left = traced.slice(0, seedIndex + 1).reverse()
+        const right = traced.slice(seedIndex + 1)
+        const trimAtBoundary = (points: PixelPoint[]) => {
+          const boundaryIndex = points.findIndex((candidate, index) => index > 0 && meetsBoundary(candidate))
+          return boundaryIndex < 0 ? points : points.slice(0, boundaryIndex)
+        }
+        traced = [...trimAtBoundary(left).reverse(), ...trimAtBoundary(right)]
+      }
+      if (traced.length < 2) {
+        showNotice('Could not follow that curve. Try painting closer to the line or adjusting color tolerance and point spacing.', 'error')
+        return
+      }
+      const targetKind: DatasetKind = tracingSpeedLine
+        ? 'speed'
+        : plotType === 'compressor' && (activeDataset?.kind === 'speed' || activeDataset?.kind === 'efficiency')
+          ? activeDataset.kind
+          : 'curve'
+      if (plotType === 'compressor' && activeDataset?.kind === targetKind && (targetKind === 'speed' || targetKind === 'efficiency')) {
+        updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: traced }))
+      } else {
+        const next = defaultDataset(datasets.length + 1, targetKind)
+        next.name = targetKind === 'speed'
+          ? `Speed line ${datasets.filter((dataset) => dataset.kind === 'speed').length + 1}`
+          : targetKind === 'efficiency'
+            ? `Efficiency contour ${datasets.filter((dataset) => dataset.kind === 'efficiency').length + 1}`
+            : `Trace ${datasets.filter((dataset) => dataset.kind === 'curve').length + 1}`
+        next.points = traced
+        setDatasets((current) => [...current, next])
+        setActiveId(next.id)
+      }
+      setMode('point-edit')
+      showNotice(`Found ${traced.length} curve points. Select a point to fine-tune its position.`)
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const tracePaintedRegion = (guide: PixelPoint[]) => {
+    if (guide.length < 2) return
+    const middle = guide[Math.floor(guide.length / 2)]
+    void traceCurve(middle, guide)
   }
 
   const handleCanvasClick = async (point: PixelPoint) => {
@@ -311,6 +390,7 @@ export default function App() {
         }
         setXAxis({ ...xAxis, points: [0, 1].map((index) => ({ ...nextPixels[index], value: values[index] })) })
         setYAxis({ ...yAxis, points: [2, 3].map((index) => ({ ...nextPixels[index], value: values[index] })) })
+        setCalibrationConfirmed(false)
         setFourPointPixels([])
         setMode('point')
         showNotice('Four-point calibration complete. X and Y are calibrated from two reference points each.')
@@ -329,56 +409,12 @@ export default function App() {
       if (current.points.some((p) => Math.hypot(p.x - point.x, p.y - point.y) < 4)) { showNotice('That calibration point is too close to an existing one.', 'error'); return }
       if (mode === 'calibrate-x') setXAxis({ ...xAxis, points: [...xAxis.points, nextPoint] })
       else setYAxis({ ...yAxis, points: [...yAxis.points, nextPoint] })
+      setCalibrationConfirmed(false)
       showNotice(`${mode === 'calibrate-x' ? 'X' : 'Y'} calibration point ${current.points.length + 1} added.`)
       return
     }
     if (mode === 'trace' || mode === 'speed') {
-      setLoading(true)
-      try {
-        const image = new Image()
-        image.src = imageUrl
-        await image.decode()
-        const canvas = document.createElement('canvas')
-        canvas.width = image.naturalWidth; canvas.height = image.naturalHeight
-        const context = canvas.getContext('2d', { willReadFrequently: true })!
-        context.drawImage(image, 0, 0)
-        let traced = traceColor(context.getImageData(0, 0, canvas.width, canvas.height), point, tolerance, sampleStep)
-        if (mode === 'speed') {
-          const boundaries = datasets.filter((dataset) => (dataset.kind === 'surge' || dataset.kind === 'choke') && dataset.points.length > 1)
-          const meetsBoundary = (candidate: PixelPoint) => boundaries.some((line) => line.points.slice(1).some((end, index) => distanceToSegment(candidate, line.points[index], end) < 10))
-          const seedIndex = traced.reduce((best, candidate, index) => Math.hypot(candidate.x - point.x, candidate.y - point.y) < Math.hypot(traced[best].x - point.x, traced[best].y - point.y) ? index : best, 0)
-          const left = traced.slice(0, seedIndex + 1).reverse()
-          const right = traced.slice(seedIndex + 1)
-          const trimAtBoundary = (points: PixelPoint[]) => {
-            const boundaryIndex = points.findIndex((candidate, index) => index > 0 && meetsBoundary(candidate))
-            return boundaryIndex < 0 ? points : points.slice(0, boundaryIndex)
-          }
-          traced = [...trimAtBoundary(left).reverse(), ...trimAtBoundary(right)]
-        }
-        if (traced.length < 2) { showNotice('Could not trace that color. Try increasing tolerance or choose a clearer seed.', 'error'); return }
-        const targetKind: DatasetKind = mode === 'speed'
-          ? 'speed'
-          : plotType === 'compressor' && (activeDataset?.kind === 'efficiency' || activeDataset?.kind === 'surge' || activeDataset?.kind === 'choke')
-            ? activeDataset.kind
-            : 'curve'
-        if (activeDataset?.kind === targetKind && (targetKind === 'speed' || targetKind === 'efficiency' || targetKind === 'surge' || targetKind === 'choke')) {
-          updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: traced }))
-          setMode('point')
-        } else {
-          const next = defaultDataset(datasets.length + 1, targetKind)
-          next.name = targetKind === 'speed'
-            ? `Speed line ${datasets.filter((dataset) => dataset.kind === 'speed').length + 1}`
-            : targetKind === 'efficiency'
-              ? `Efficiency contour ${datasets.filter((dataset) => dataset.kind === 'efficiency').length + 1}`
-              : `Trace ${datasets.filter((dataset) => dataset.kind === 'curve').length + 1}`
-          next.points = traced
-          setDatasets((current) => [...current, next])
-          setActiveId(next.id)
-          setMode('point')
-        }
-        showNotice(`Traced ${traced.length} points along the selected curve.`)
-      } catch { showNotice('Image could not be analyzed in this browser.', 'error') }
-      finally { setLoading(false) }
+      await traceCurve(point)
       return
     }
     if (mode === 'surge' || mode === 'choke' || mode === 'point' || mode === 'measure') {
@@ -576,7 +612,8 @@ export default function App() {
             <div className="tool-group-label tool-gap">DIGITIZE</div>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !activePoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
-            <button className={`tool-button ${mode === 'trace' ? 'selected' : ''}`} onClick={() => setMode('trace')} disabled={!imagePrepared}><span className="tool-icon"><WandSparkles size={16} /></span><span>Color trace</span><kbd>A</kbd></button>
+            <button className={`tool-button ${mode === 'trace' ? 'selected' : ''}`} onClick={() => setMode('trace')} disabled={!imagePrepared}><span className="tool-icon"><WandSparkles size={16} /></span><span>Find curve from seed</span><kbd>A</kbd></button>
+            <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span></button>
             <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => { if (activeDataset?.kind !== 'measurement') addDataset('measurement'); setMode('measure') }} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
               <div className="tool-group-label tool-gap">COMPRESSOR MAP</div>
@@ -598,18 +635,28 @@ export default function App() {
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
             <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Processed scan' : 'Original image'} datasets={datasets} activeDatasetId={activeId} mode={mode}
-              calibrationMarkers={[
-                ...xAxis.points.map((point, index) => ({ axis: 'x' as const, index, point })),
-                ...yAxis.points.map((point, index) => ({ axis: 'y' as const, index, point })),
+              calibrationMarkers={calibrationConfirmed && mode !== 'calibrate-edit' ? [] : [
+                ...xAxis.points.map((point, index) => ({ axis: 'x' as const, index, point, value: point.value, label: `X${index + 1}` })),
+                ...yAxis.points.map((point, index) => ({ axis: 'y' as const, index, point, value: point.value, label: `Y${index + 1}` })),
               ]}
+              calibrationMarkerColor={calibrationMarkerColor}
+              showCalibrationMarkers={!calibrationConfirmed || mode === 'calibrate-edit'}
+              xAxis={xAxis}
+              yAxis={yAxis}
+              coordinateLabels={plotType === 'compressor'
+                ? { x: axisName(compressorAxes.x), y: axisName(compressorAxes.y) }
+                : { x: 'X', y: 'Y' }}
+              coordinateScales={{ x: xAxis.scale, y: yAxis.scale }}
+              traceBrushWidth={traceBrushWidth}
               onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
               onCropSelection={(rect) => { void cropImage(rect) }}
               onMovePoint={(index, point) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) })) }}
-              onMoveCalibrationPoint={updateCalibrationPoint} />
+              onMoveCalibrationPoint={updateCalibrationPoint}
+              onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px.' : mode.startsWith('calibrate') ? ' · Click a chart tick and enter its value in the right panel.' : mode === 'trace' ? ' · Click a curve seed; the tracer follows its local shape.' : mode === 'speed' ? ' · Click a speed-line seed; available Surge/Choke boundaries stop the trace.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px.' : mode === 'trace-region' ? ' · Paint along the center of the curve; release to extract it.' : mode === 'trace' ? ' · Click a seed on the curve; the finder follows its shape.' : mode === 'speed' ? ' · Click or paint over a speed line; optional Surge/Choke boundaries stop the trace.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -650,12 +697,21 @@ export default function App() {
                 <button className="axis-detect-button" onClick={() => { setFourPointPixels([]); setMode('calibrate-four') }} disabled={!imagePrepared}>
                   {mode === 'calibrate-four' && fourPointPixels.length ? 'Restart 4-point calibration' : 'Start 4-point calibration'}
                 </button>
-                {calibrated && <button className={`axis-detect-button ${mode === 'calibrate-edit' ? 'waiting' : ''}`} onClick={() => setMode(mode === 'calibrate-edit' ? 'select' : 'calibrate-edit')}>
-                  {mode === 'calibrate-edit' ? 'Done modifying calibration' : 'Modify calibration markers'}
-                </button>}
               </div>
               <AxisEditor axis="x" coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes.x) : 'X value'} calibration={xAxis} setValue={setXValue} value={xValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} updatePointValue={updateCalibrationValue} />
               <AxisEditor axis="y" coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y value'} calibration={yAxis} setValue={setYValue} value={yValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} updatePointValue={updateCalibrationValue} />
+              {calibrated && <div className="calibration-confirm-row">
+                <span>{calibrationConfirmed ? 'Calibration confirmed · markers hidden' : 'Review the labeled points, then confirm calibration.'}</span>
+                <button className="axis-detect-button" onClick={() => {
+                  if (calibrationConfirmed) {
+                    setCalibrationConfirmed(false)
+                    setMode('calibrate-edit')
+                  } else {
+                    setCalibrationConfirmed(true)
+                    setMode('point')
+                  }
+                }}>{calibrationConfirmed ? 'Modify calibration' : 'Confirm calibration'}</button>
+              </div>}
               <button className="axis-detect-button" onClick={() => { void calibrateFromDetectedGrid() }} disabled={gridDetecting || !imagePrepared}>
                 <ScanSearch size={14} /> {gridDetecting ? 'Detecting grid…' : 'Detect grid & calibrate'}
               </button>
@@ -694,10 +750,18 @@ export default function App() {
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
-            {mode === 'trace' || mode === 'speed' ? <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">AUTO TRACE</span><h2>Smart curve trace</h2></div><ScanSearch size={16} /></div><p className="section-copy">Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</p><label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label><label className="range-row"><span>X-step sampling</span><strong>{sampleStep}px</strong><input type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label><div className="trace-hint"><Sparkles size={13} /> Seeds both directions and favors color matches that continue the curve's local direction.</div></section> : null}
+            {mode === 'trace' || mode === 'trace-region' || mode === 'speed' ? <section className="panel-section extraction-section">
+              <div className="section-heading"><div><span className="section-kicker">CURVE EXTRACTION</span><h2>{mode === 'trace-region' ? 'Painted curve finder' : 'Automatic curve finder'}</h2></div><ScanSearch size={16} /></div>
+              <p className="section-copy">For a chart with overlapping curves, paint along the curve center. Otherwise, seed the curve with one click. Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</p>
+              <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
+              <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
+              <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
+              <div className="trace-hint"><Sparkles size={13} /> The finder follows the selected curve shape; paint width limits how far it searches from your stroke.</div>
+            </section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
             </>}
           </div> : <div className="panel-content settings-content">
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">CALIBRATION</span><h2>Marker appearance</h2></div></div><p className="section-copy">The selected calibration point uses this color. Confirmed calibration hides the markers.</p><label className="format-control"><span>Selected marker color</span><input aria-label="Selected calibration marker color" type="color" value={calibrationMarkerColor} onChange={(event) => setCalibrationMarkerColor(event.target.value)} /></label></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={exportProject}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">OUTPUT</span><h2>Data formatting</h2></div></div><p className="section-copy">Apply sort order and numeric precision to generated exports.</p><label className="format-control"><span>Sort points by</span><select aria-label="Export sort order" value={sortBy} onChange={(event) => setSortBy(event.target.value as 'x' | 'y')}><option value="x">X ascending</option><option value="y">Y ascending</option></select></label><label className="format-control precision-control"><span>Significant digits <strong>{precision}</strong></span><input aria-label="Export precision" type="range" min="2" max="12" step="1" value={precision} onChange={(event) => setPrecision(Number(event.target.value))} /></label></section>
