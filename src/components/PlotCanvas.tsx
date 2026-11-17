@@ -162,7 +162,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       setCropCursor(point)
       return
     }
-    if (mode !== 'point' && mode !== 'select' && mode !== 'surge' && mode !== 'choke') return
+    if (mode !== 'point' && mode !== 'select' && mode !== 'surge' && mode !== 'choke' && mode !== 'speed') return
     event.currentTarget.focus()
     const point = toImagePoint(event)
     const nearest = activeDataset?.points.reduce<{ index: number; distance: number } | null>((best, candidate, index) => {
@@ -178,7 +178,11 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
   }
 
   const handleMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    const point = toImagePoint(event)
+    const rawPoint = toImagePoint(event)
+    const point = {
+      x: Math.max(0, Math.min(dimensions.width - 1, rawPoint.x)),
+      y: Math.max(0, Math.min(dimensions.height - 1, rawPoint.y)),
+    }
     if (draggedPointRef.current !== null) onMovePoint(draggedPointRef.current, point)
     if (cropStart) setCropCursor(point)
     setCursor(point)

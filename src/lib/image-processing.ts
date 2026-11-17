@@ -3,6 +3,9 @@ export interface ImageAdjustments {
   contrast: number
   grayscale: boolean
   threshold: number
+  automaticThreshold: boolean
+  invert: boolean
+  sharpen: number
 }
 
 export async function adjustPlotImage(source: string, adjustments: ImageAdjustments): Promise<string> {
@@ -21,29 +24,87 @@ export async function adjustPlotImage(source: string, adjustments: ImageAdjustme
   const frame = context.getImageData(0, 0, canvas.width, canvas.height)
   const { data } = frame
   const contrast = (259 * (adjustments.contrast + 255)) / (255 * (259 - adjustments.contrast))
+  const width = canvas.width
+  const height = canvas.height
+  const sharpen = Math.max(0, Math.min(1, adjustments.sharpen / 100))
+  const original = sharpen > 0 ? new Uint8ClampedArray(data) : null
+  const luminance = new Uint8Array(width * height)
+  const histogram = new Uint32Array(256)
 
-  for (let index = 0; index < data.length; index += 4) {
-    let red = data[index] + adjustments.brightness
-    let green = data[index + 1] + adjustments.brightness
-    let blue = data[index + 2] + adjustments.brightness
+  for (let pixel = 0, index = 0; index < data.length; pixel += 1, index += 4) {
+    let red = original?.[index] ?? data[index]
+    let green = original?.[index + 1] ?? data[index + 1]
+    let blue = original?.[index + 2] ?? data[index + 2]
 
-    red = contrast * (red - 128) + 128
-    green = contrast * (green - 128) + 128
-    blue = contrast * (blue - 128) + 128
-
-    if (adjustments.grayscale || adjustments.threshold < 255) {
-      const luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
-      const level = adjustments.threshold < 255
-        ? luminance >= adjustments.threshold ? 255 : 0
-        : luminance
-      red = level
-      green = level
-      blue = level
+    if (original && pixel % width > 0 && pixel % width < width - 1 && pixel >= width && pixel < width * (height - 1)) {
+      const sharpenChannel = (channel: number) => {
+        const center = original[index + channel]
+        const neighbors = original[index - width * 4 + channel] + original[index + width * 4 + channel]
+          + original[index - 4 + channel] + original[index + 4 + channel]
+        return center * (1 + 4 * sharpen) - sharpen * neighbors
+      }
+      red = sharpenChannel(0)
+      green = sharpenChannel(1)
+      blue = sharpenChannel(2)
     }
 
+    red = contrast * (red + adjustments.brightness - 128) + 128
+    green = contrast * (green + adjustments.brightness - 128) + 128
+    blue = contrast * (blue + adjustments.brightness - 128) + 128
     data[index] = Math.max(0, Math.min(255, red))
     data[index + 1] = Math.max(0, Math.min(255, green))
     data[index + 2] = Math.max(0, Math.min(255, blue))
+
+    const level = Math.round(data[index] * 0.2126 + data[index + 1] * 0.7152 + data[index + 2] * 0.0722)
+    luminance[pixel] = level
+    histogram[level] += 1
+  }
+
+  let threshold = adjustments.automaticThreshold ? 0 : adjustments.threshold
+  if (adjustments.automaticThreshold) {
+    const total = width * height
+    let sum = 0
+    for (let level = 0; level < 256; level += 1) sum += level * histogram[level]
+    let backgroundWeight = 0
+    let backgroundSum = 0
+    let maximumVariance = -1
+    for (let level = 0; level < 256; level += 1) {
+      backgroundWeight += histogram[level]
+      if (!backgroundWeight) continue
+      const foregroundWeight = total - backgroundWeight
+      if (!foregroundWeight) break
+      backgroundSum += level * histogram[level]
+      const backgroundMean = backgroundSum / backgroundWeight
+      const foregroundMean = (sum - backgroundSum) / foregroundWeight
+      const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2
+      if (variance > maximumVariance) {
+        maximumVariance = variance
+        threshold = level
+      }
+    }
+  }
+
+  const applyThreshold = adjustments.automaticThreshold || adjustments.threshold < 255
+  for (let pixel = 0, index = 0; index < data.length; pixel += 1, index += 4) {
+    let red = data[index]
+    let green = data[index + 1]
+    let blue = data[index + 2]
+    if (applyThreshold) {
+      const foreground = adjustments.automaticThreshold
+        ? luminance[pixel] > threshold
+        : luminance[pixel] >= threshold
+      red = green = blue = foreground ? 255 : 0
+    } else if (adjustments.grayscale) {
+      red = green = blue = luminance[pixel]
+    }
+    if (adjustments.invert) {
+      red = 255 - red
+      green = 255 - green
+      blue = 255 - blue
+    }
+    data[index] = red
+    data[index + 1] = green
+    data[index + 2] = blue
   }
 
   context.putImageData(frame, 0, 0)

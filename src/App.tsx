@@ -13,6 +13,9 @@ import { downloadFile, pointToData, traceColor } from './lib/digitizer'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
 
 type Notice = { message: string; type?: 'error' | 'success' }
+type CompressorAxisVariable = 'flow' | 'head' | 'outletPressure' | 'pressureRatio' | 'efficiency' | 'speed' | 'igv' | 'custom'
+type CompressorAxisConfig = { variable: CompressorAxisVariable; label: string; unit: string }
+type CompressorAxes = { x: CompressorAxisConfig; y: CompressorAxisConfig }
 const palette = ['#48d7bf', '#f4a261', '#b9a7ff', '#e87878', '#73b7ed', '#e7ca76', '#ef8bcb']
 const plotOptions: { id: PlotType; label: string; icon: typeof LineChart }[] = [
   { id: 'xy', label: 'X-Y Plot', icon: LineChart }, { id: 'bar', label: 'Bar Chart', icon: Activity },
@@ -21,6 +24,17 @@ const plotOptions: { id: PlotType; label: string; icon: typeof LineChart }[] = [
   { id: 'compressor', label: 'Compressor map', icon: Gauge },
 ]
 const blankAxis = (): AxisCalibration => ({ points: [], scale: 'linear' })
+const compressorAxisLabels: Record<CompressorAxisVariable, string> = {
+  flow: 'Flow', head: 'Head', outletPressure: 'Outlet pressure', pressureRatio: 'Pressure ratio',
+  efficiency: 'Efficiency', speed: 'Speed', igv: 'IGV', custom: 'Custom',
+}
+const compressorAxisOptions = (Object.entries(compressorAxisLabels) as [CompressorAxisVariable, string][]).map(([value, label]) => ({ value, label }))
+const defaultCompressorAxes: CompressorAxes = {
+  x: { variable: 'flow', label: 'Flow', unit: '' },
+  y: { variable: 'pressureRatio', label: 'Pressure ratio', unit: '' },
+}
+type FourPointValues = { x1: string; x2: string; y1: string; y2: string }
+const initialFourPointValues: FourPointValues = { x1: '0', x2: '1', y1: '0', y2: '1' }
 const distanceToSegment = (point: PixelPoint, start: PixelPoint, end: PixelPoint) => {
   const dx = end.x - start.x
   const dy = end.y - start.y
@@ -30,15 +44,21 @@ const distanceToSegment = (point: PixelPoint, start: PixelPoint, end: PixelPoint
 }
 
 const defaultDataset = (index: number, kind: DatasetKind = 'curve'): Dataset => ({
-  id: crypto.randomUUID(), name: kind === 'surge' ? 'Surge line' : kind === 'choke' ? 'Choke line' : kind === 'speed' ? `Speed line ${index}` : `Dataset ${index}`,
-  color: palette[(index - 1) % palette.length], kind, points: [], rpm: kind === 'speed' ? 10500 : undefined,
+  id: crypto.randomUUID(), name: kind === 'surge' ? 'Surge line' : kind === 'choke' ? 'Choke line' : kind === 'speed' ? `Speed line ${index}` : kind === 'efficiency' ? `Efficiency contour ${index}` : `Dataset ${index}`,
+  color: palette[(index - 1) % palette.length], kind, points: [],
+  rpm: kind === 'speed' ? 10500 : undefined,
+  speedUnit: kind === 'speed' ? 'RPM' : undefined,
+  efficiencyValue: kind === 'efficiency' ? 80 : undefined,
 })
+const axisName = (axis: CompressorAxisConfig) => axis.unit ? `${axis.label} (${axis.unit})` : axis.label
+const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`
 const formatAxisValue = (value: number, scale: ScaleType, precision: number) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : value.toPrecision(precision)
 
 const modeLabels: Record<ToolMode, string> = {
-  select: 'Select', 'calibrate-x': 'Set X calibration', 'calibrate-y': 'Set Y calibration', point: 'Add data points',
+  select: 'Select', 'calibrate-x': 'Set X calibration', 'calibrate-y': 'Set Y calibration',
+  'calibrate-four': 'Four-point calibration', point: 'Add data points',
   surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance', trace: 'Seed auto-trace', crop: 'Crop image',
 }
 
@@ -58,8 +78,11 @@ export default function App() {
   const [mode, setMode] = useState<ToolMode>('select')
   const [xAxis, setXAxis] = useState<AxisCalibration>(blankAxis())
   const [yAxis, setYAxis] = useState<AxisCalibration>(blankAxis())
+  const [compressorAxes, setCompressorAxes] = useState<CompressorAxes>(defaultCompressorAxes)
   const [xValue, setXValue] = useState('0')
   const [yValue, setYValue] = useState('0')
+  const [fourPointValues, setFourPointValues] = useState<FourPointValues>(initialFourPointValues)
+  const [fourPointPixels, setFourPointPixels] = useState<PixelPoint[]>([])
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(3)
@@ -105,6 +128,8 @@ export default function App() {
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
     const initialDataset = defaultDataset(1)
     setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); setActiveId(initialDataset.id)
+    setCompressorAxes(defaultCompressorAxes)
+    setFourPointPixels([])
     setMode('select')
   }
 
@@ -158,22 +183,73 @@ export default function App() {
   }
 
   const updateDataset = (id: string, update: (dataset: Dataset) => Dataset) => setDatasets((current) => current.map((dataset) => dataset.id === id ? update(dataset) : dataset))
+  const updatePointCoordinate = (datasetId: string, pointIndex: number, coordinate: 'x' | 'y', rawValue: string) => {
+    if (!rawValue.trim()) return
+    const value = Number(rawValue)
+    if (!Number.isFinite(value)) return
+    updateDataset(datasetId, (dataset) => ({
+      ...dataset,
+      points: dataset.points.map((point, index) => index === pointIndex ? { ...point, [coordinate]: value } : point),
+    }))
+  }
+  const updateCompressorAxis = (axis: 'x' | 'y', patch: Partial<CompressorAxisConfig>) => setCompressorAxes((current) => ({
+    ...current,
+    [axis]: { ...current[axis], ...patch },
+  }))
 
   const addDataset = (kind?: DatasetKind) => {
     const selectedKind = kind ?? (plotType === 'compressor' ? 'speed' : 'curve')
-    if (plotType === 'compressor' && selectedKind === 'speed') {
-      const hasSurge = datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2)
-      const hasChoke = datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2)
-      if (!hasSurge || !hasChoke) { showNotice('Digitize both Surge and Choke boundaries before adding a speed line.', 'error'); return }
-    }
     const next = defaultDataset(datasets.length + 1, selectedKind)
     setDatasets((current) => [...current, next])
     setActiveId(next.id)
-    setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : 'point')
+    setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : selectedKind === 'efficiency' ? 'trace' : 'point')
   }
 
   const handleCanvasClick = async (point: PixelPoint) => {
     if (!imageUrl || !imagePrepared) return
+    if (mode === 'calibrate-four') {
+      const step = fourPointPixels.length
+      const keys: (keyof FourPointValues)[] = ['x1', 'x2', 'y1', 'y2']
+      const key = keys[step]
+      if (!key) { setFourPointPixels([]); return }
+      const axis = step < 2 ? xAxis : yAxis
+      const rawValue = fourPointValues[key]
+      const value = axis.scale === 'date' ? Date.parse(rawValue) : Number(rawValue)
+      if (!Number.isFinite(value)) {
+        showNotice(`Enter a valid ${axis.scale === 'date' ? 'date/time' : 'numeric'} value for ${key.toUpperCase()} before clicking the chart.`, 'error')
+        return
+      }
+      const duplicatePixel = step === 1
+        ? Math.abs(fourPointPixels[0].x - point.x) < 4
+        : step === 3 && Math.abs(fourPointPixels[2].y - point.y) < 4
+      if (duplicatePixel) {
+        showNotice('Calibration points on the same axis must be at least 4 pixels apart.', 'error')
+        return
+      }
+      const nextPixels = [...fourPointPixels, point]
+      if (nextPixels.length === 4) {
+        const values = keys.map((item) => {
+          const scale = item.startsWith('x') ? xAxis.scale : yAxis.scale
+          return scale === 'date' ? Date.parse(fourPointValues[item]) : Number(fourPointValues[item])
+        })
+        const validScaleValue = (value: number, scale: ScaleType) =>
+          Number.isFinite(value) && (scale !== 'log' || value > 0) && (scale !== 'inverse' || value !== 0)
+        if (!values.every((item, index) => validScaleValue(item, index < 2 ? xAxis.scale : yAxis.scale))
+          || values[0] === values[1] || values[2] === values[3]) {
+          showNotice('Use distinct values valid for the selected axis scales (log values must be positive; inverse values cannot be zero).', 'error')
+          return
+        }
+        setXAxis({ ...xAxis, points: [0, 1].map((index) => ({ ...nextPixels[index], value: values[index] })) })
+        setYAxis({ ...yAxis, points: [2, 3].map((index) => ({ ...nextPixels[index], value: values[index] })) })
+        setFourPointPixels([])
+        setMode('point')
+        showNotice('Four-point calibration complete. X and Y are calibrated from two reference points each.')
+      } else {
+        setFourPointPixels(nextPixels)
+        showNotice(`${key.toUpperCase()} captured. Click ${keys[step + 1].toUpperCase()} on the chart.`)
+      }
+      return
+    }
     if (mode === 'calibrate-x' || mode === 'calibrate-y') {
       const current = mode === 'calibrate-x' ? xAxis : yAxis
       const rawValue = mode === 'calibrate-x' ? xValue : yValue
@@ -210,13 +286,27 @@ export default function App() {
           traced = [...trimAtBoundary(left).reverse(), ...trimAtBoundary(right)]
         }
         if (traced.length < 2) { showNotice('Could not trace that color. Try increasing tolerance or choose a clearer seed.', 'error'); return }
-        const kind: DatasetKind = mode === 'speed' ? 'speed' : 'curve'
-        const next = defaultDataset(datasets.length + 1, kind)
-        next.name = kind === 'speed' ? `Speed line ${datasets.filter((dataset) => dataset.kind === 'speed').length + 1}` : `Trace ${datasets.filter((dataset) => dataset.kind === 'curve').length + 1}`
-        next.points = traced
-        next.rpm = kind === 'speed' ? Number(window.prompt('Constant speed tag (RPM)', '10500') || 10500) : undefined
-        setDatasets((current) => [...current, next]); setActiveId(next.id); setMode('point')
-        showNotice(`Traced ${traced.length} points from the selected seed color.`)
+        const targetKind: DatasetKind = mode === 'speed'
+          ? 'speed'
+          : plotType === 'compressor' && (activeDataset?.kind === 'efficiency' || activeDataset?.kind === 'surge' || activeDataset?.kind === 'choke')
+            ? activeDataset.kind
+            : 'curve'
+        if (activeDataset?.kind === targetKind && (targetKind === 'speed' || targetKind === 'efficiency' || targetKind === 'surge' || targetKind === 'choke')) {
+          updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: traced }))
+          setMode('point')
+        } else {
+          const next = defaultDataset(datasets.length + 1, targetKind)
+          next.name = targetKind === 'speed'
+            ? `Speed line ${datasets.filter((dataset) => dataset.kind === 'speed').length + 1}`
+            : targetKind === 'efficiency'
+              ? `Efficiency contour ${datasets.filter((dataset) => dataset.kind === 'efficiency').length + 1}`
+              : `Trace ${datasets.filter((dataset) => dataset.kind === 'curve').length + 1}`
+          next.points = traced
+          setDatasets((current) => [...current, next])
+          setActiveId(next.id)
+          setMode('point')
+        }
+        showNotice(`Traced ${traced.length} points along the selected curve.`)
       } catch { showNotice('Image could not be analyzed in this browser.', 'error') }
       finally { setLoading(false) }
       return
@@ -292,14 +382,35 @@ export default function App() {
   const exportDataset = (dataset: Dataset, format: 'csv' | 'json') => {
     const points = getExportPoints(dataset)
     const csvRows = points.map((point) => `${point.x},${point.y}`)
-    if (format === 'csv') downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.csv`, [calibrated ? 'x,y' : 'pixel_x,pixel_y', ...csvRows].join('\\n'), 'text/csv')
+    if (format === 'csv') {
+      const header = plotType === 'compressor' && calibrated
+        ? [axisName(compressorAxes.x), axisName(compressorAxes.y)].map(csvField).join(',')
+        : calibrated ? 'x,y' : 'pixel_x,pixel_y'
+      downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.csv`, [header, ...csvRows].join('\\n'), 'text/csv')
+    }
     else {
       const data = dataset.kind === 'speed'
-        ? { rpm: dataset.rpm, flow: points.map((point) => point.x), pressureRatio: points.map((point) => point.y) }
+        ? {
+            rpm: dataset.rpm, speed: dataset.rpm, speedUnit: dataset.speedUnit, igv: dataset.igv, igvUnit: dataset.igvUnit,
+            xValues: points.map((point) => point.x), yValues: points.map((point) => point.y),
+            axes: compressorAxes,
+            ...(compressorAxes.x.variable === 'flow' ? { flow: points.map((point) => point.x) } : {}),
+            ...(compressorAxes.y.variable === 'pressureRatio' ? { pressureRatio: points.map((point) => point.y) } : {}),
+          }
         : dataset.kind === 'efficiency'
-          ? { flow: points.map((point) => point.x), efficiency: points.map((point) => point.y) }
+          ? {
+              efficiencyPercent: dataset.efficiencyValue,
+              xValues: points.map((point) => point.x), yValues: points.map((point) => point.y),
+              axes: compressorAxes,
+              ...(compressorAxes.x.variable === 'flow' ? { flow: points.map((point) => point.x) } : {}),
+              ...(compressorAxes.y.variable === 'efficiency' ? { efficiency: points.map((point) => point.y) } : {}),
+            }
           : { points }
-      downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.json`, JSON.stringify({ name: dataset.name, kind: dataset.kind, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels', ...data }, null, 2), 'application/json')
+      downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.json`, JSON.stringify({
+        name: dataset.name, kind: dataset.kind, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels',
+        ...(plotType === 'compressor' ? { axes: compressorAxes } : {}),
+        ...data,
+      }, null, 2), 'application/json')
     }
   }
 
@@ -308,10 +419,21 @@ export default function App() {
     const project = plotType === 'compressor'
       ? {
           plotType, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels',
+          axes: compressorAxes,
           surgeLine: datasetsData.find(({ dataset }) => dataset.kind === 'surge')?.points.map((point) => [point.x, point.y]) ?? [],
           chokeLine: datasetsData.find(({ dataset }) => dataset.kind === 'choke')?.points.map((point) => [point.x, point.y]) ?? [],
-          speedLines: datasetsData.filter(({ dataset }) => dataset.kind === 'speed').map(({ dataset, points }) => ({ rpm: dataset.rpm, flow: points.map((point) => point.x), pressureRatio: points.map((point) => point.y) })),
-          efficiencyContours: datasetsData.filter(({ dataset }) => dataset.kind === 'efficiency').map(({ dataset, points }) => ({ name: dataset.name, flow: points.map((point) => point.x), efficiency: points.map((point) => point.y) })),
+          speedLines: datasetsData.filter(({ dataset }) => dataset.kind === 'speed').map(({ dataset, points }) => ({
+            name: dataset.name, rpm: dataset.rpm, speed: dataset.rpm, speedUnit: dataset.speedUnit, igv: dataset.igv, igvUnit: dataset.igvUnit,
+            xValues: points.map((point) => point.x), yValues: points.map((point) => point.y), axes: compressorAxes,
+            ...(compressorAxes.x.variable === 'flow' ? { flow: points.map((point) => point.x) } : {}),
+            ...(compressorAxes.y.variable === 'pressureRatio' ? { pressureRatio: points.map((point) => point.y) } : {}),
+          })),
+          efficiencyContours: datasetsData.filter(({ dataset }) => dataset.kind === 'efficiency').map(({ dataset, points }) => ({
+            name: dataset.name, efficiencyPercent: dataset.efficiencyValue,
+            xValues: points.map((point) => point.x), yValues: points.map((point) => point.y), axes: compressorAxes,
+            ...(compressorAxes.x.variable === 'flow' ? { flow: points.map((point) => point.x) } : {}),
+            ...(compressorAxes.y.variable === 'efficiency' ? { efficiency: points.map((point) => point.y) } : {}),
+          })),
         }
       : { plotType, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels', datasets: datasetsData.map(({ dataset, points }) => ({ name: dataset.name, kind: dataset.kind, points })) }
     downloadFile(`${imageName || 'plot'}-data.json`, JSON.stringify(project, null, 2), 'application/json')
@@ -329,7 +451,7 @@ export default function App() {
         reader.readAsDataURL(blob)
       })
     }
-    const project = { version: 1, imageName, imageUrl: portableImage, plotType, xAxis, yAxis, datasets }
+    const project = { version: 1, imageName, imageUrl: portableImage, plotType, xAxis, yAxis, datasets, compressorAxes }
     downloadFile(`${imageName.toLowerCase().replace(/\\s+/g, '-') || 'plot'}-project.json`, JSON.stringify(project), 'application/json')
   }
 
@@ -339,7 +461,7 @@ export default function App() {
     try {
       const project = JSON.parse(await file.text())
       if (project.version !== 1 || !Array.isArray(project.datasets)) throw new Error('Unsupported project file')
-      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.imageUrl || null); setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(Boolean(project.imageUrl)); setAxisDetection(null); setPlotType(project.plotType || 'xy')
+      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.imageUrl || null); setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(Boolean(project.imageUrl)); setAxisDetection(null); setPlotType(project.plotType || 'xy'); setFourPointPixels([]); setCompressorAxes(project.compressorAxes || defaultCompressorAxes)
       setXAxis(project.xAxis || blankAxis()); setYAxis(project.yAxis || blankAxis()); setDatasets(project.datasets)
       setActiveId(project.datasets[0]?.id ?? ''); setMode('point'); showNotice('Project opened successfully.')
     } catch { showNotice('That project file is invalid or unsupported.', 'error') }
@@ -401,13 +523,30 @@ export default function App() {
 
         <section className="center-workspace" aria-label="Plot workspace">
           <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right"><button title="Undo last point" onClick={() => activeDataset && updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) }))} disabled={!activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" className={showTable ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
-          {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Digitize Surge and Choke first; speed-line traces stop when they meet a boundary.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
+          {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
             <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Processed scan' : 'Original image'} datasets={datasets} activeDatasetId={activeId} mode={mode} calibrationMarkers={[...xAxis.points, ...yAxis.points, ...(axisDetection ? [axisDetection.intersection] : [])]} onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)} onCropSelection={(rect) => { void cropImage(rect) }} onMovePoint={(index, point) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) })) }} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode.startsWith('calibrate') ? ' · Click a chart tick and enter its value in the right panel.' : mode === 'trace' ? ' · Click the curve to sample its color and trace it.' : mode === 'speed' ? ' · Click a speed-line seed; trace ends at Surge/Choke.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Select one and use arrow keys; Shift moves 10 px.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select</span>}</div>
-          {showTable && <div className="data-table-panel"><div className="data-table-head"><strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong><span>{calibrated ? `${calibratedPoints.length} points` : 'Set both axes to show data values'}</span></div><div className="data-table-scroll"><table><thead><tr><th>#</th><th>X</th><th>Y</th><th>Pixel X</th><th>Pixel Y</th></tr></thead><tbody>{(activeDataset?.points ?? []).slice(0, 120).map((point, index) => { const value = pointToData(point, xAxis, yAxis); return <tr key={`${point.x}-${point.y}-${index}`}><td>{index + 1}</td><td>{value ? formatAxisValue(value.x, xAxis.scale, precision) : '—'}</td><td>{value ? formatAxisValue(value.y, yAxis.scale, precision) : '—'}</td><td>{Math.round(point.x)}</td><td>{Math.round(point.y)}</td></tr> })}</tbody></table></div></div>}
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode.startsWith('calibrate') ? ' · Click a chart tick and enter its value in the right panel.' : mode === 'trace' ? ' · Click a curve seed; the tracer follows its local shape.' : mode === 'speed' ? ' · Click a speed-line seed; available Surge/Choke boundaries stop the trace.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Select one and use arrow keys; Shift moves 10 px.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select</span>}</div>
+          {showTable && <div className="data-table-panel">
+            <div className="data-table-head">
+              <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
+              <span>{calibrated ? `${calibratedPoints.length} points` : 'Set both axes to show data values'} · Edit pixel coordinates to fine-tune</span>
+            </div>
+            <div className="data-table-scroll"><table><thead><tr><th>#</th><th>{plotType === 'compressor' ? axisName(compressorAxes.x) : 'X'}</th><th>{plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y'}</th><th>Pixel X</th><th>Pixel Y</th></tr></thead>
+              <tbody>{(activeDataset?.points ?? []).slice(0, 120).map((point, index) => {
+                const value = pointToData(point, xAxis, yAxis)
+                return <tr key={`${point.x}-${point.y}-${index}`}>
+                  <td>{index + 1}</td>
+                  <td>{value ? formatAxisValue(value.x, xAxis.scale, precision) : '—'}</td>
+                  <td>{value ? formatAxisValue(value.y, yAxis.scale, precision) : '—'}</td>
+                  <td><input className="point-coordinate-input" aria-label={`${activeDataset?.name} point ${index + 1} pixel X`} type="number" step="0.1" value={point.x} onChange={(event) => activeDataset && updatePointCoordinate(activeDataset.id, index, 'x', event.target.value)} /></td>
+                  <td><input className="point-coordinate-input" aria-label={`${activeDataset?.name} point ${index + 1} pixel Y`} type="number" step="0.1" value={point.y} onChange={(event) => activeDataset && updatePointCoordinate(activeDataset.id, index, 'y', event.target.value)} /></td>
+                </tr>
+              })}</tbody>
+            </table></div>
+          </div>}
         </section>
 
         <aside className="right-panel">
@@ -417,22 +556,52 @@ export default function App() {
             {imagePrepared && <>
             <section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
               <p className="section-copy">Click two known ticks on each axis and enter their values.</p>
+              <div className="four-point-calibration">
+                <strong>Guided 4-point calibration</strong>
+                <p>Enter the values for two X ticks and two Y ticks, then click them in order: X1, X2, Y1, Y2.</p>
+                <div className="four-point-values">
+                  {(['x1', 'x2', 'y1', 'y2'] as const).map((key) => <label key={key}>{key.toUpperCase()}<input aria-label={`${key.toUpperCase()} calibration value`} value={fourPointValues[key]} placeholder={(key.startsWith('x') ? xAxis.scale : yAxis.scale) === 'date' ? 'Date / time' : 'Tick value'} onChange={(event) => setFourPointValues((current) => ({ ...current, [key]: event.target.value }))} /></label>)}
+                </div>
+                <button className="axis-detect-button" onClick={() => { setFourPointPixels([]); setMode('calibrate-four') }} disabled={!imagePrepared}>
+                  {mode === 'calibrate-four' && fourPointPixels.length ? 'Restart 4-point calibration' : 'Start 4-point calibration'}
+                </button>
+              </div>
               <AxisEditor axis="x" calibration={xAxis} setValue={setXValue} value={xValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} />
               <AxisEditor axis="y" calibration={yAxis} setValue={setYValue} value={yValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} />
               <button className="axis-detect-button" onClick={() => { void detectAxes() }}><ScanSearch size={14} /> Auto-detect axes & origin</button>
               {axisDetection && <p className="axis-detect-note">Intersection near {Math.round(axisDetection.intersection.x)}, {Math.round(axisDetection.intersection.y)} px · verify against the scan.</p>}
             </section>
-            {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Map boundaries</strong><span>Speed lines require both boundaries first.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
+            {plotType === 'compressor' && <section className="panel-section compressor-axis-config">
+              <div className="section-heading"><div><span className="section-kicker">COMPRESSOR MAP</span><h2>Map axes</h2></div></div>
+              <p className="section-copy">Choose what the calibrated horizontal and vertical values represent.</p>
+              {(['x', 'y'] as const).map((axis) => <div className="compressor-axis-fields" key={axis}>
+                <label className="format-control"><span>{axis.toUpperCase()} variable</span>
+                  <select aria-label={`Compressor ${axis.toUpperCase()} variable`} value={compressorAxes[axis].variable} onChange={(event) => {
+                    const variable = event.target.value as CompressorAxisVariable
+                    updateCompressorAxis(axis, { variable, label: compressorAxisLabels[variable] })
+                  }}>
+                    {compressorAxisOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                <label className="format-control"><span>{axis.toUpperCase()} label</span><input aria-label={`Compressor ${axis.toUpperCase()} label`} value={compressorAxes[axis].label} onChange={(event) => updateCompressorAxis(axis, { label: event.target.value })} /></label>
+                <label className="format-control"><span>{axis.toUpperCase()} unit</span><input aria-label={`Compressor ${axis.toUpperCase()} unit`} value={compressorAxes[axis].unit} placeholder="Optional" onChange={(event) => updateCompressorAxis(axis, { unit: event.target.value })} /></label>
+              </div>)}
+            </section>}
+            {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Optional boundaries</strong><span>Add Surge/Choke to stop speed traces near their sampled points.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
             <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" onClick={() => addDataset()} title="Add dataset">+</button></div>
               <div className="dataset-list">{datasets.map((dataset) => <div key={dataset.id} className={`dataset-card ${dataset.id === activeId ? 'active' : ''}`}>
-                <button className="dataset-select" onClick={() => { setActiveId(dataset.id); setMode(dataset.kind === 'surge' ? 'surge' : dataset.kind === 'choke' ? 'choke' : dataset.kind === 'speed' ? 'speed' : 'point') }} aria-label={`Select ${dataset.name}`}><span className="dataset-swatch" style={{ backgroundColor: dataset.color }} /><span className="dataset-meta"><span className="dataset-name">{dataset.name}</span><span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} RPM` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span></span><span className="dataset-point-count">{dataset.points.length}</span></button>
+                <button className="dataset-select" onClick={() => { setActiveId(dataset.id); setMode(dataset.kind === 'surge' ? 'surge' : dataset.kind === 'choke' ? 'choke' : dataset.kind === 'speed' ? 'speed' : dataset.kind === 'efficiency' && plotType === 'compressor' ? 'trace' : 'point') }} aria-label={`Select ${dataset.name}`}><span className="dataset-swatch" style={{ backgroundColor: dataset.color }} /><span className="dataset-meta"><span className="dataset-name">{dataset.name}</span><span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} ${dataset.speedUnit || 'RPM'}${dataset.igv === undefined ? '' : ` · IGV ${dataset.igv}${dataset.igvUnit ? ` ${dataset.igvUnit}` : ''}`}` : dataset.kind === 'efficiency' ? `${dataset.efficiencyValue ?? '—'}% contour` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span></span><span className="dataset-point-count">{dataset.points.length}</span></button>
                 {dataset.id === activeId && <div className="dataset-controls"><input aria-label="Dataset name" value={dataset.name} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, name: event.target.value }))} /><label className="color-control" title="Dataset color"><input aria-label="Dataset color" type="color" value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label><button title="Export CSV" aria-label="Export CSV" onClick={() => exportDataset(dataset, 'csv')}><FileSpreadsheet size={14} /></button><button title="Delete dataset" aria-label={`Delete ${dataset.name}`} onClick={() => { if (datasets.length === 1) { updateDataset(dataset.id, (current) => ({ ...current, points: [] })); return } const next = datasets.filter((item) => item.id !== dataset.id); setDatasets(next); setActiveId(next[0].id) }}><Trash2 size={14} /></button></div>}
-                {dataset.kind === 'speed' && dataset.id === activeId && <label className="rpm-control">Constant speed tag <div><input type="number" step="100" value={dataset.rpm ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, rpm: Number(event.target.value) }))} /><span>RPM</span></div></label>}
+                {dataset.kind === 'speed' && dataset.id === activeId && <>
+                  <label className="rpm-control">Speed value <div><input aria-label="Speed value" type="number" step="100" value={dataset.rpm ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, rpm: event.target.value === '' ? undefined : Number(event.target.value) }))} /><input aria-label="Speed unit" value={dataset.speedUnit ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, speedUnit: event.target.value }))} /></div></label>
+                  <label className="rpm-control">IGV setting <div><input aria-label="IGV value" type="number" step="1" value={dataset.igv ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, igv: event.target.value === '' ? undefined : Number(event.target.value) }))} /><input aria-label="IGV unit" value={dataset.igvUnit ?? ''} placeholder="Optional unit" onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, igvUnit: event.target.value }))} /></div></label>
+                </>}
+                {dataset.kind === 'efficiency' && dataset.id === activeId && <label className="rpm-control">Efficiency contour <div><input aria-label="Efficiency contour value" type="number" min="0" max="100" step="0.1" value={dataset.efficiencyValue ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, efficiencyValue: event.target.value === '' ? undefined : Number(event.target.value) }))} /><span>%</span></div></label>}
               </div>)}</div>
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
-            {mode === 'trace' || mode === 'speed' ? <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">AUTO TRACE</span><h2>Color extraction</h2></div><ScanSearch size={16} /></div><p className="section-copy">Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</p><label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label><label className="range-row"><span>X-step sampling</span><strong>{sampleStep}px</strong><input type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label><div className="trace-hint"><Sparkles size={13} /> Seed from the canvas, then follow the closest matching pixels.</div></section> : null}
+            {mode === 'trace' || mode === 'speed' ? <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">AUTO TRACE</span><h2>Smart curve trace</h2></div><ScanSearch size={16} /></div><p className="section-copy">Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</p><label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label><label className="range-row"><span>X-step sampling</span><strong>{sampleStep}px</strong><input type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label><div className="trace-hint"><Sparkles size={13} /> Seeds both directions and favors color matches that continue the curve's local direction.</div></section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
             </>}
           </div> : <div className="panel-content settings-content">

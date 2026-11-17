@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'point' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'crop'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'point' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'crop'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
@@ -12,6 +12,10 @@ export interface Dataset {
   kind: DatasetKind
   points: PixelPoint[]
   rpm?: number
+  speedUnit?: string
+  igv?: number
+  igvUnit?: string
+  efficiencyValue?: number
 }
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
 
@@ -69,20 +73,43 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
   const sy = Math.max(0, Math.min(height - 1, Math.round(seed.y)))
   const seedOffset = (sy * width + sx) * 4
   const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
-  const radius = Math.max(12, Math.round(height * 0.14))
   const stride = Math.max(1, Math.round(step))
   const traceDirection = (direction: -1 | 1) => {
     const points: PixelPoint[] = [{ x: sx, y: sy }]
-    let lastY = sy
+    let misses = 0
     for (let x = sx + direction * stride; x >= 0 && x < width; x += direction * stride) {
-      let bestY = -1
-      let bestDistance = Infinity
-      for (let y = Math.max(0, lastY - radius); y <= Math.min(height - 1, lastY + radius); y++) {
+      const last = points[points.length - 1]
+      const previous = points.length > 1 ? points[points.length - 2] : null
+      const slope = previous ? (last.y - previous.y) / (last.x - previous.x) : 0
+      const baseRadius = Math.min(
+        Math.max(12, Math.round(height * 0.08)) + Math.ceil(Math.abs(slope * stride)),
+        Math.max(12, Math.round(height * 0.2)),
+      )
+      const older = points.length > 2 ? points[points.length - 3] : null
+      const previousSlope = older && previous ? (previous.y - older.y) / (previous.x - older.x) : slope
+      const curvature = older ? (slope - previousSlope) / (last.x - older.x) : 0
+      const dx = x - last.x
+      const curveCorrection = Math.max(-baseRadius / 2, Math.min(baseRadius / 2, curvature * dx * dx / 2))
+      const predictedY = last.y + slope * dx + curveCorrection
+      const radius = baseRadius
+      let best: PixelPoint | null = null
+      let bestScore = Infinity
+      for (let y = Math.max(0, Math.round(predictedY) - radius); y <= Math.min(height - 1, Math.round(predictedY) + radius); y++) {
         const index = (y * width + x) * 4
         const distance = Math.hypot(data[index] - target[0], data[index + 1] - target[1], data[index + 2] - target[2])
-        if (distance < bestDistance && distance <= tolerance) { bestDistance = distance; bestY = y }
+        if (distance > tolerance) continue
+        const score = distance + Math.abs(y - predictedY) * 0.8
+        if (score < bestScore) {
+          bestScore = score
+          best = { x, y }
+        }
       }
-      if (bestY >= 0) { points.push({ x, y: bestY }); lastY = bestY }
+      if (best) {
+        points.push(best)
+        misses = 0
+      } else if (++misses >= 2) {
+        break
+      }
     }
     return points
   }

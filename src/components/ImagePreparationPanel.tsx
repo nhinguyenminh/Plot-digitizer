@@ -13,7 +13,10 @@ interface Props {
   onContinue: () => void
 }
 
-const initialAdjustments: ImageAdjustments = { brightness: 0, contrast: 0, grayscale: false, threshold: 255 }
+const initialAdjustments: ImageAdjustments = {
+  brightness: 0, contrast: 0, grayscale: false, threshold: 255,
+  automaticThreshold: false, invert: false, sharpen: 0,
+}
 
 export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, onApply, onToggleCompare, onContinue }: Props) {
   const [adjustments, setAdjustments] = useState(initialAdjustments)
@@ -30,7 +33,10 @@ export default function ImagePreparationPanel({ hasImage, hasProcessedImage, sho
         <label className="range-row prep-range"><span>Brightness</span><strong>{adjustments.brightness}</strong><input aria-label="Image brightness" type="range" min="-80" max="80" value={adjustments.brightness} onChange={(event) => update({ brightness: Number(event.target.value) })} /></label>
         <label className="range-row prep-range"><span>Contrast</span><strong>{adjustments.contrast}</strong><input aria-label="Image contrast" type="range" min="-80" max="120" value={adjustments.contrast} onChange={(event) => update({ contrast: Number(event.target.value) })} /></label>
         <label className="prep-check"><input type="checkbox" checked={adjustments.grayscale} onChange={(event) => update({ grayscale: event.target.checked })} /><span>Convert to grayscale</span></label>
-        <label className="range-row prep-range"><span>Clean background</span><strong>{adjustments.threshold === 255 ? 'Off' : adjustments.threshold}</strong><input aria-label="Background cleanup threshold" type="range" min="120" max="255" value={adjustments.threshold} onChange={(event) => update({ threshold: Number(event.target.value) })} /></label>
+        <label className="prep-check"><input type="checkbox" checked={adjustments.automaticThreshold} onChange={(event) => update({ automaticThreshold: event.target.checked })} /><span>Automatic background threshold</span></label>
+        <label className="range-row prep-range"><span>Manual threshold</span><strong>{adjustments.threshold === 255 ? 'Off' : adjustments.threshold}</strong><input aria-label="Background cleanup threshold" type="range" min="120" max="255" value={adjustments.threshold} disabled={adjustments.automaticThreshold} onChange={(event) => update({ threshold: Number(event.target.value), automaticThreshold: false })} /></label>
+        <label className="range-row prep-range"><span>Sharpen details</span><strong>{adjustments.sharpen}%</strong><input aria-label="Image sharpening" type="range" min="0" max="100" value={adjustments.sharpen} onChange={(event) => update({ sharpen: Number(event.target.value) })} /></label>
+        <label className="prep-check"><input type="checkbox" checked={adjustments.invert} onChange={(event) => update({ invert: event.target.checked })} /><span>Invert colors</span></label>
         <div className="prep-actions">
           <button className="prep-apply" onClick={() => onApply(adjustments)} disabled={processing}>
             <WandSparkles size={14} /> {processing ? 'Preparing…' : hasProcessedImage ? 'Update processed image' : 'Apply cleanup'}
