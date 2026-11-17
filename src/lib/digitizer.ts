@@ -67,10 +67,54 @@ export function csvForDataset(dataset: Dataset, xAxis: AxisCalibration, yAxis: A
   return ['x,y', ...sorted.map((point) => `${Number(point.x.toPrecision(8))},${Number(point.y.toPrecision(8))}`)].join('\n')
 }
 
+function smoothTrace(points: PixelPoint[], radius: number): PixelPoint[] {
+  if (points.length < 3) return points
+  return points.map((point, index) => {
+    const ys = points.slice(Math.max(0, index - radius), Math.min(points.length, index + radius + 1)).map((candidate) => candidate.y).sort((a, b) => a - b)
+    return { x: point.x, y: ys[Math.floor(ys.length / 2)] }
+  })
+}
+
+function simplifyTrace(points: PixelPoint[], tolerance: number): PixelPoint[] {
+  if (points.length < 3) return points
+  const keep = new Uint8Array(points.length)
+  keep[0] = 1
+  keep[points.length - 1] = 1
+  const ranges: Array<[number, number]> = [[0, points.length - 1]]
+  while (ranges.length) {
+    const [start, end] = ranges.pop()!
+    const a = points[start]
+    const b = points[end]
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const lengthSquared = dx * dx + dy * dy
+    let furthest = -1
+    let maxDistance = tolerance
+    for (let index = start + 1; index < end; index++) {
+      const point = points[index]
+      const projection = lengthSquared === 0
+        ? 0
+        : Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared))
+      const distance = Math.hypot(point.x - (a.x + projection * dx), point.y - (a.y + projection * dy))
+      if (distance > maxDistance) {
+        maxDistance = distance
+        furthest = index
+      }
+    }
+    if (furthest >= 0) {
+      keep[furthest] = 1
+      ranges.push([start, furthest], [furthest, end])
+    }
+  }
+  return points.filter((_, index) => keep[index] === 1)
+}
+
 export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: number, step: number, guide?: PixelPoint[], guideRadius = 16): PixelPoint[] {
   const { width, height, data } = imageData
   const sx = Math.max(0, Math.min(width - 1, Math.round(seed.x)))
   const sortedGuide = guide?.length ? [...guide].sort((a, b) => a.x - b.x) : null
+  const guideMinX = sortedGuide?.[0].x ?? 0
+  const guideMaxX = sortedGuide?.[sortedGuide.length - 1].x ?? width - 1
   const guideAt = (x: number) => {
     if (!sortedGuide?.length) return null
     if (x <= sortedGuide[0].x) return sortedGuide[0]
@@ -85,12 +129,54 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
   const nearestGuide = sortedGuide?.reduce((best, point) => Math.abs(point.x - sx) < Math.abs(best.x - sx) ? point : best)
   const sy = Math.max(0, Math.min(height - 1, Math.round(nearestGuide?.y ?? seed.y)))
   const seedOffset = (sy * width + sx) * 4
-  const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
   const stride = Math.max(1, Math.round(step))
+  const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
+  if (sortedGuide?.length) {
+    const sampleCount = Math.min(11, sortedGuide.length)
+    const guideColors: number[][] = []
+    const saturatedGuideColors: number[][] = []
+    for (let sample = 0; sample < sampleCount; sample++) {
+      const guideIndex = Math.round(sample * (sortedGuide.length - 1) / Math.max(1, sampleCount - 1))
+      const center = sortedGuide[guideIndex]
+      let darkest = Infinity
+      let guideColor: number[] | null = null
+      let highestSaturation = 24
+      let saturatedGuideColor: number[] | null = null
+      for (let x = Math.max(0, Math.round(center.x) - Math.max(1, Math.floor(stride / 2))); x <= Math.min(width - 1, Math.round(center.x) + Math.max(1, Math.floor(stride / 2))); x++) {
+        for (let y = Math.max(0, Math.round(center.y) - guideRadius); y <= Math.min(height - 1, Math.round(center.y) + guideRadius); y++) {
+          const offset = (y * width + x) * 4
+          const red = data[offset]
+          const green = data[offset + 1]
+          const blue = data[offset + 2]
+          const brightness = data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722
+          if (data[offset + 3] > 127 && brightness < darkest) {
+            darkest = brightness
+            guideColor = [red, green, blue]
+          }
+          const saturation = Math.max(red, green, blue) - Math.min(red, green, blue)
+          if (data[offset + 3] > 127 && saturation > highestSaturation) {
+            highestSaturation = saturation
+            saturatedGuideColor = [red, green, blue]
+          }
+        }
+      }
+      if (guideColor && darkest < 250) guideColors.push(guideColor)
+      if (saturatedGuideColor) saturatedGuideColors.push(saturatedGuideColor)
+    }
+    const targetColors = saturatedGuideColors.length >= Math.max(2, Math.ceil(sampleCount / 4))
+      ? saturatedGuideColors
+      : guideColors
+    if (targetColors.length) {
+      for (let channel = 0; channel < 3; channel++) {
+        const values = targetColors.map((color) => color[channel]).sort((a, b) => a - b)
+        target[channel] = values[Math.floor(values.length / 2)]
+      }
+    }
+  }
   const traceDirection = (direction: -1 | 1) => {
     const points: PixelPoint[] = [{ x: sx, y: sy }]
     let misses = 0
-    for (let x = sx + direction * stride; x >= 0 && x < width; x += direction * stride) {
+    for (let x = sx + direction * stride; x >= 0 && x < width && x >= guideMinX && x <= guideMaxX; x += direction * stride) {
       const last = points[points.length - 1]
       const previous = points.length > 1 ? points[points.length - 2] : null
       const guideNext = guideAt(x)
@@ -133,7 +219,9 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
   }
   const left = traceDirection(-1).reverse()
   const right = traceDirection(1).slice(1)
-  return [...left, ...right]
+  const traced = [...left, ...right]
+  const smoothed = smoothTrace(traced, stride >= 6 ? 1 : 2)
+  return simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)))
 }
 
 export function downloadFile(name: string, content: string, mime = 'text/plain') {

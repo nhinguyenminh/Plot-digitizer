@@ -92,7 +92,7 @@ export default function App() {
   const [fourPointPixels, setFourPointPixels] = useState<PixelPoint[]>([])
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
-  const [sampleStep, setSampleStep] = useState(3)
+  const [sampleStep, setSampleStep] = useState(8)
   const [traceBrushWidth, setTraceBrushWidth] = useState(24)
   const [calibrationMarkerColor, setCalibrationMarkerColor] = useState('#36d399')
   const [calibrationConfirmed, setCalibrationConfirmed] = useState(false)
@@ -756,7 +756,7 @@ export default function App() {
               <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
               <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
               <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
-              <div className="trace-hint"><Sparkles size={13} /> The finder follows the selected curve shape; paint width limits how far it searches from your stroke.</div>
+              <div className="trace-hint"><Sparkles size={13} /> Paint along the curve center. Brush width sets its search band; spacing controls point density, and simplification removes pixel noise.</div>
             </section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
             </>}
