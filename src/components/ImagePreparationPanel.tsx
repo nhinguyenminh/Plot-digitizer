@@ -16,6 +16,7 @@ interface Props {
 const initialAdjustments: ImageAdjustments = {
   brightness: 0, contrast: 0, grayscale: false, threshold: 255,
   automaticThreshold: false, invert: false, sharpen: 0,
+  separateGrid: false, gridColor: '#b9a7ff',
 }
 
 export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, onApply, onToggleCompare, onContinue }: Props) {
@@ -37,6 +38,7 @@ export default function ImagePreparationPanel({ hasImage, hasProcessedImage, sho
         <label className="range-row prep-range"><span>Manual threshold</span><strong>{adjustments.threshold === 255 ? 'Off' : adjustments.threshold}</strong><input aria-label="Background cleanup threshold" type="range" min="120" max="255" value={adjustments.threshold} disabled={adjustments.automaticThreshold} onChange={(event) => update({ threshold: Number(event.target.value), automaticThreshold: false })} /></label>
         <label className="range-row prep-range"><span>Sharpen details</span><strong>{adjustments.sharpen}%</strong><input aria-label="Image sharpening" type="range" min="0" max="100" value={adjustments.sharpen} onChange={(event) => update({ sharpen: Number(event.target.value) })} /></label>
         <label className="prep-check"><input type="checkbox" checked={adjustments.invert} onChange={(event) => update({ invert: event.target.checked })} /><span>Invert colors</span></label>
+        <label className="prep-check"><input type="checkbox" checked={adjustments.separateGrid} onChange={(event) => update({ separateGrid: event.target.checked })} /><span>Recolor detected grid lines</span><input aria-label="Grid line highlight color" className="grid-color-input" type="color" value={adjustments.gridColor} onChange={(event) => update({ gridColor: event.target.value })} /></label>
         <div className="prep-actions">
           <button className="prep-apply" onClick={() => onApply(adjustments)} disabled={processing}>
             <WandSparkles size={14} /> {processing ? 'Preparing…' : hasProcessedImage ? 'Update processed image' : 'Apply cleanup'}

@@ -6,6 +6,103 @@ export interface ImageAdjustments {
   automaticThreshold: boolean
   invert: boolean
   sharpen: number
+  separateGrid: boolean
+  gridColor: string
+}
+
+export interface DetectedPlotGrid {
+  horizontalLines: number[]
+  verticalLines: number[]
+  confidence: number
+}
+
+function findPlotGrid(data: Uint8ClampedArray, width: number, height: number): DetectedPlotGrid | null {
+  const dark = (x: number, y: number) => {
+    const offset = (y * width + x) * 4
+    return data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722 < 175
+  }
+  const findLines = (orientation: 'horizontal' | 'vertical') => {
+    const horizontal = orientation === 'horizontal'
+    const start = horizontal ? Math.floor(height * 0.04) : Math.floor(width * 0.03)
+    const end = horizontal ? Math.ceil(height * 0.98) : Math.ceil(width * 0.97)
+    const spanStart = horizontal ? Math.floor(width * 0.08) : Math.floor(height * 0.03)
+    const spanEnd = horizontal ? Math.ceil(width * 0.97) : Math.ceil(height * 0.94)
+    const span = spanEnd - spanStart
+    const minimumScore = span * 0.3
+    const scores: number[] = []
+
+    for (let position = start; position < end; position += 1) {
+      let score = 0
+      for (let offset = spanStart; offset < spanEnd; offset += 1) {
+        if (horizontal ? dark(offset, position) : dark(position, offset)) score += 1
+      }
+      scores.push(score)
+    }
+
+    const candidates: number[] = []
+    let groupStart = -1
+    for (let index = 0; index <= scores.length; index += 1) {
+      const qualifies = index < scores.length && scores[index] >= minimumScore
+      if (qualifies && groupStart < 0) groupStart = index
+      if (!qualifies && groupStart >= 0) {
+        let weightedPosition = 0
+        let totalScore = 0
+        for (let member = groupStart; member < index; member += 1) {
+          weightedPosition += (start + member) * scores[member]
+          totalScore += scores[member]
+        }
+        candidates.push(Math.round(weightedPosition / totalScore))
+        groupStart = -1
+      }
+    }
+    return candidates.slice(0, 20)
+  }
+
+  const horizontalLines = findLines('horizontal')
+  const verticalLines = findLines('vertical')
+  if (horizontalLines.length < 2 || verticalLines.length < 2) return null
+  return {
+    horizontalLines,
+    verticalLines,
+    confidence: Math.min(horizontalLines.length / 5, verticalLines.length / 5, 1),
+  }
+}
+
+function recolorDetectedGrid(data: Uint8ClampedArray, width: number, height: number, color: string) {
+  const grid = findPlotGrid(data, width, height)
+  if (!grid) return
+  const red = Number.parseInt(color.slice(1, 3), 16)
+  const green = Number.parseInt(color.slice(3, 5), 16)
+  const blue = Number.parseInt(color.slice(5, 7), 16)
+  if (![red, green, blue].every(Number.isFinite)) return
+
+  const isDark = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return false
+    const offset = (y * width + x) * 4
+    return data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722 < 175
+  }
+  const recolor = (x: number, y: number) => {
+    const offset = (y * width + x) * 4
+    data[offset] = red
+    data[offset + 1] = green
+    data[offset + 2] = blue
+  }
+  const crossingOffsets = [-8, -6, -3, 0, 3, 6, 8]
+
+  for (const y of grid.horizontalLines) {
+    for (let x = Math.floor(width * 0.08); x < Math.ceil(width * 0.97); x += 1) {
+      const curveCrossing = crossingOffsets.some((offset) => isDark(x + offset, y - 3))
+        && crossingOffsets.some((offset) => isDark(x + offset, y + 3))
+      if (isDark(x, y) && !curveCrossing) recolor(x, y)
+    }
+  }
+  for (const x of grid.verticalLines) {
+    for (let y = Math.floor(height * 0.03); y < Math.ceil(height * 0.94); y += 1) {
+      const curveCrossing = crossingOffsets.some((offset) => isDark(x - 3, y + offset))
+        && crossingOffsets.some((offset) => isDark(x + 3, y + offset))
+      if (isDark(x, y) && !curveCrossing) recolor(x, y)
+    }
+  }
 }
 
 export async function adjustPlotImage(source: string, adjustments: ImageAdjustments): Promise<string> {
@@ -107,6 +204,7 @@ export async function adjustPlotImage(source: string, adjustments: ImageAdjustme
     data[index + 2] = blue
   }
 
+  if (adjustments.separateGrid) recolorDetectedGrid(data, width, height, adjustments.gridColor)
   context.putImageData(frame, 0, 0)
   return canvas.toDataURL('image/png')
 }
@@ -116,6 +214,23 @@ export interface DetectedAxes {
   yAxisX: number
   intersection: { x: number; y: number }
   confidence: number
+}
+
+export async function detectPlotGrid(source: string): Promise<DetectedPlotGrid | null> {
+  const image = new Image()
+  image.crossOrigin = 'anonymous'
+  image.src = source
+  await image.decode()
+
+  const canvas = document.createElement('canvas')
+  canvas.width = image.naturalWidth
+  canvas.height = image.naturalHeight
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('This browser cannot inspect the image.')
+  context.drawImage(image, 0, 0)
+
+  const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height)
+  return findPlotGrid(data, width, height)
 }
 
 export async function detectPlotAxes(source: string): Promise<DetectedAxes | null> {

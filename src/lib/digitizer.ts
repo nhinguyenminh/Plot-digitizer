@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'point' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'crop'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'crop'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 

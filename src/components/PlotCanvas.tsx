@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dataset, PixelPoint, ToolMode } from '../lib/digitizer'
 
+interface CalibrationMarker {
+  axis: 'x' | 'y'
+  index: number
+  point: PixelPoint
+}
+
 interface Props {
   imageUrl: string | null
   imageLabel: string
@@ -9,17 +15,19 @@ interface Props {
   mode: ToolMode
   onCanvasClick: (point: PixelPoint) => void
   onDeletePoint: (point: PixelPoint) => void
-  calibrationMarkers: PixelPoint[]
+  calibrationMarkers: CalibrationMarker[]
   onSeedColor: (rgb: [number, number, number]) => void
   onCropSelection: (rect: { x: number; y: number; width: number; height: number }) => void
   onMovePoint: (index: number, point: PixelPoint) => void
+  onMoveCalibrationPoint: (axis: 'x' | 'y', index: number, point: PixelPoint) => void
 }
 
-export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatasetId, mode, onCanvasClick, onDeletePoint, calibrationMarkers, onSeedColor, onCropSelection, onMovePoint }: Props) {
+export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatasetId, mode, onCanvasClick, onDeletePoint, calibrationMarkers, onSeedColor, onCropSelection, onMovePoint, onMoveCalibrationPoint }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
   const draggedPointRef = useRef<number | null>(null)
+  const draggedCalibrationRef = useRef<{ axis: 'x' | 'y'; index: number } | null>(null)
   const suppressClickRef = useRef(false)
   const imageRef = useRef<HTMLImageElement | null>(null)
   const [cursor, setCursor] = useState<PixelPoint | null>(null)
@@ -29,6 +37,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
   const [cropCursor, setCropCursor] = useState<PixelPoint | null>(null)
   const [lensPosition, setLensPosition] = useState<PixelPoint | null>(null)
   const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null)
+  const [selectedCalibration, setSelectedCalibration] = useState<{ axis: 'x' | 'y'; index: number } | null>(null)
   useEffect(() => setSelectedPointIndex(null), [activeDatasetId])
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -63,12 +72,13 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       })
       context.restore()
     })
-    calibrationMarkers.forEach((point, index) => {
+    calibrationMarkers.forEach(({ point, axis, index }) => {
       const radius = Math.max(6, image.width / 190)
-      context.strokeStyle = index % 2 === 0 ? '#f0bd78' : '#9eb6ff'
+      const selected = selectedCalibration?.axis === axis && selectedCalibration.index === index
+      context.strokeStyle = selected ? '#ffffff' : axis === 'x' ? '#f0bd78' : '#9eb6ff'
       context.lineWidth = Math.max(2, image.width / 900)
       context.beginPath()
-      context.arc(point.x, point.y, radius, 0, Math.PI * 2)
+      context.arc(point.x, point.y, radius + (selected ? 3 : 0), 0, Math.PI * 2)
       context.stroke()
       context.beginPath()
       context.moveTo(point.x - radius * 1.5, point.y)
@@ -77,7 +87,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       context.lineTo(point.x, point.y + radius * 1.5)
       context.stroke()
     })
-  }, [datasets, calibrationMarkers, activeDatasetId, selectedPointIndex])
+  }, [datasets, calibrationMarkers, activeDatasetId, selectedPointIndex, selectedCalibration])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -133,6 +143,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
 
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
+    if (mode === 'calibrate-edit' || mode === 'point-edit' || mode === 'select') return
     onCanvasClick(toImagePoint(event))
     if (mode === 'point') setSelectedPointIndex(activeDataset?.points.length ?? null)
   }
@@ -143,9 +154,19 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
     }
     const direction = directions[event.key]
-    if (!direction || selectedPointIndex === null || !activeDataset) return
+    if (!direction) return
     event.preventDefault()
     const step = event.shiftKey ? 10 : 1
+    if (mode === 'calibrate-edit' && selectedCalibration) {
+      const marker = calibrationMarkers.find(({ axis, index }) => axis === selectedCalibration.axis && index === selectedCalibration.index)
+      if (!marker) return
+      onMoveCalibrationPoint(marker.axis, marker.index, {
+        x: Math.max(0, Math.min(dimensions.width - 1, marker.point.x + direction.x * step)),
+        y: Math.max(0, Math.min(dimensions.height - 1, marker.point.y + direction.y * step)),
+      })
+      return
+    }
+    if ((mode !== 'point-edit' && mode !== 'select') || selectedPointIndex === null || !activeDataset) return
     const point = activeDataset.points[selectedPointIndex]
     if (!point) return
     onMovePoint(selectedPointIndex, {
@@ -162,7 +183,22 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       setCropCursor(point)
       return
     }
-    if (mode !== 'point' && mode !== 'select' && mode !== 'surge' && mode !== 'choke' && mode !== 'speed') return
+    if (mode === 'calibrate-edit') {
+      event.currentTarget.focus()
+      const point = toImagePoint(event)
+      const nearest = calibrationMarkers.reduce<{ marker: CalibrationMarker; distance: number } | null>((best, marker) => {
+        const distance = Math.hypot(marker.point.x - point.x, marker.point.y - point.y)
+        return distance < 20 && (!best || distance < best.distance) ? { marker, distance } : best
+      }, null)
+      if (nearest) {
+        const selected = { axis: nearest.marker.axis, index: nearest.marker.index }
+        draggedCalibrationRef.current = selected
+        setSelectedCalibration(selected)
+        event.currentTarget.setPointerCapture(event.pointerId)
+      }
+      return
+    }
+    if (mode !== 'point' && mode !== 'point-edit' && mode !== 'select' && mode !== 'surge' && mode !== 'choke' && mode !== 'speed') return
     event.currentTarget.focus()
     const point = toImagePoint(event)
     const nearest = activeDataset?.points.reduce<{ index: number; distance: number } | null>((best, candidate, index) => {
@@ -184,6 +220,10 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       y: Math.max(0, Math.min(dimensions.height - 1, rawPoint.y)),
     }
     if (draggedPointRef.current !== null) onMovePoint(draggedPointRef.current, point)
+    if (draggedCalibrationRef.current) {
+      const { axis, index } = draggedCalibrationRef.current
+      onMoveCalibrationPoint(axis, index, point)
+    }
     if (cropStart) setCropCursor(point)
     setCursor(point)
     const shell = event.currentTarget.closest('.canvas-shell')
@@ -198,6 +238,11 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
   }
 
   const handlePointerUp = () => {
+    if (draggedCalibrationRef.current) {
+      draggedCalibrationRef.current = null
+      suppressClickRef.current = true
+      return
+    }
     if (draggedPointRef.current !== null) {
       draggedPointRef.current = null
       suppressClickRef.current = true
@@ -223,7 +268,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
         <div className="canvas-status"><span className="status-dot" /> {imageLabel} <span className="status-divider">/</span> {dimensions.width} × {dimensions.height} px</div>
         <div className="canvas-scroll">
           <div className="canvas-scale" style={{ transform: `scale(${scale})` }}>
-            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Click to digitize points or calibrate axes. Select a point then use arrow keys to nudge it; hold Shift to move ten pixels." />
+            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Add or edit curve points, edit calibration markers, and use arrow keys to nudge a selected point; hold Shift to move ten pixels." />
             {cropRect && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true"><rect {...cropRect} /></svg>}
           </div>
         </div>
