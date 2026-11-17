@@ -75,7 +75,7 @@ function smoothTrace(points: PixelPoint[], radius: number): PixelPoint[] {
   })
 }
 
-function simplifyTrace(points: PixelPoint[], tolerance: number): PixelPoint[] {
+function simplifyTrace(points: PixelPoint[], tolerance: number, maxSegmentLength: number): PixelPoint[] {
   if (points.length < 3) return points
   const keep = new Uint8Array(points.length)
   keep[0] = 1
@@ -104,6 +104,10 @@ function simplifyTrace(points: PixelPoint[], tolerance: number): PixelPoint[] {
     if (furthest >= 0) {
       keep[furthest] = 1
       ranges.push([start, furthest], [furthest, end])
+    } else if (Math.hypot(dx, dy) > maxSegmentLength) {
+      const midpoint = Math.floor((start + end) / 2)
+      keep[midpoint] = 1
+      ranges.push([start, midpoint], [midpoint, end])
     }
   }
   return points.filter((_, index) => keep[index] === 1)
@@ -221,7 +225,7 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
   const right = traceDirection(1).slice(1)
   const traced = [...left, ...right]
   const smoothed = smoothTrace(traced, stride >= 6 ? 1 : 2)
-  return simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)))
+  return simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)), stride * 5)
 }
 
 export function downloadFile(name: string, content: string, mime = 'text/plain') {
