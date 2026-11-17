@@ -3,6 +3,7 @@ import type { Dataset, PixelPoint, ToolMode } from '../lib/digitizer'
 
 interface Props {
   imageUrl: string | null
+  imageLabel: string
   datasets: Dataset[]
   activeDatasetId: string
   mode: ToolMode
@@ -14,7 +15,7 @@ interface Props {
   onMovePoint: (index: number, point: PixelPoint) => void
 }
 
-export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, onCanvasClick, onDeletePoint, calibrationMarkers, onSeedColor, onCropSelection, onMovePoint }: Props) {
+export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatasetId, mode, onCanvasClick, onDeletePoint, calibrationMarkers, onSeedColor, onCropSelection, onMovePoint }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -27,6 +28,8 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
   const [cropStart, setCropStart] = useState<PixelPoint | null>(null)
   const [cropCursor, setCropCursor] = useState<PixelPoint | null>(null)
   const [lensPosition, setLensPosition] = useState<PixelPoint | null>(null)
+  const [selectedPointIndex, setSelectedPointIndex] = useState<number | null>(null)
+  useEffect(() => setSelectedPointIndex(null), [activeDatasetId])
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     const image = imageRef.current
@@ -45,9 +48,17 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
         dataset.points.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y))
         context.stroke()
       }
-      dataset.points.forEach((point) => {
+      dataset.points.forEach((point, index) => {
+        const radius = Math.max(3, image.width / 260)
+        if (dataset.id === activeDatasetId && index === selectedPointIndex) {
+          context.beginPath()
+          context.arc(point.x, point.y, radius + 4, 0, Math.PI * 2)
+          context.strokeStyle = '#ffffff'
+          context.lineWidth = Math.max(1.5, image.width / 850)
+          context.stroke()
+        }
         context.beginPath()
-        context.arc(point.x, point.y, Math.max(3, image.width / 260), 0, Math.PI * 2)
+        context.arc(point.x, point.y, radius, 0, Math.PI * 2)
         context.fill()
       })
       context.restore()
@@ -66,7 +77,7 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
       context.lineTo(point.x, point.y + radius * 1.5)
       context.stroke()
     })
-  }, [datasets, calibrationMarkers])
+  }, [datasets, calibrationMarkers, activeDatasetId, selectedPointIndex])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -123,6 +134,24 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
     onCanvasClick(toImagePoint(event))
+    if (mode === 'point') setSelectedPointIndex(activeDataset?.points.length ?? null)
+  }
+
+  const handleCanvasKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
+    const directions: Record<string, PixelPoint> = {
+      ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 },
+      ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
+    }
+    const direction = directions[event.key]
+    if (!direction || selectedPointIndex === null || !activeDataset) return
+    event.preventDefault()
+    const step = event.shiftKey ? 10 : 1
+    const point = activeDataset.points[selectedPointIndex]
+    if (!point) return
+    onMovePoint(selectedPointIndex, {
+      x: Math.max(0, Math.min(dimensions.width - 1, point.x + direction.x * step)),
+      y: Math.max(0, Math.min(dimensions.height - 1, point.y + direction.y * step)),
+    })
   }
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -134,6 +163,7 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
       return
     }
     if (mode !== 'point' && mode !== 'select' && mode !== 'surge' && mode !== 'choke') return
+    event.currentTarget.focus()
     const point = toImagePoint(event)
     const nearest = activeDataset?.points.reduce<{ index: number; distance: number } | null>((best, candidate, index) => {
       const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y)
@@ -141,6 +171,8 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
     }, null)
     if (nearest) {
       draggedPointRef.current = nearest.index
+      setSelectedPointIndex(nearest.index)
+      event.currentTarget.focus()
       event.currentTarget.setPointerCapture(event.pointerId)
     }
   }
@@ -184,10 +216,10 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
   return (
     <div className={`canvas-shell ${imageUrl ? 'has-image' : ''}`}>
       {imageUrl ? <>
-        <div className="canvas-status"><span className="status-dot" /> Original image <span className="status-divider">/</span> {dimensions.width} × {dimensions.height} px</div>
+        <div className="canvas-status"><span className="status-dot" /> {imageLabel} <span className="status-divider">/</span> {dimensions.width} × {dimensions.height} px</div>
         <div className="canvas-scroll">
           <div className="canvas-scale" style={{ transform: `scale(${scale})` }}>
-            <canvas ref={canvasRef} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Click to digitize points or calibrate axes; right click a point to remove it." />
+            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Click to digitize points or calibrate axes. Select a point then use arrow keys to nudge it; hold Shift to move ten pixels." />
             {cropRect && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true"><rect {...cropRect} /></svg>}
           </div>
         </div>
@@ -195,11 +227,11 @@ export default function PlotCanvas({ imageUrl, datasets, activeDatasetId, mode, 
         <div className="canvas-footer">
           <span className="coordinate-readout"><span className="readout-crosshair">⌖</span> {cursorText}</span>
           <div className="zoom-controls"><button aria-label="Zoom out" onClick={() => setScale((value) => Math.max(.5, value - .1))}>−</button><span>{Math.round(scale * 100)}%</span><button aria-label="Zoom in" onClick={() => setScale((value) => Math.min(2.5, value + .1))}>+</button><button aria-label="Reset zoom" onClick={() => setScale(1)}>↗</button></div>
-          <span className="canvas-hint">{activeDataset?.name ?? 'No dataset selected'} <span>·</span> Right-click to remove a point</span>
+          <span className="canvas-hint">{activeDataset?.name ?? 'No dataset selected'} <span>·</span> Select a point · arrows nudge, Shift + arrows moves 10 px</span>
         </div>
       </> : <div className="canvas-empty">
         <div className="upload-illustration"><div className="grid-line grid-one" /><div className="grid-line grid-two" /><div className="grid-line grid-three" /><div className="axis-x" /><div className="axis-y" /><span className="plot-dot dot-one" /><span className="plot-dot dot-two" /><span className="plot-dot dot-three" /></div>
-        <h2>Bring a plot into focus</h2><p>Drop an image here or choose a file to start tracing data.</p><span className="supported-formats">PNG · JPG · WEBP · BMP</span>
+        <h2>Bring a plot into focus</h2><p>Paste an image, drop it here, or choose a file to start.</p><span className="supported-formats">PNG · JPG · WEBP · BMP</span>
       </div>}
     </div>
   )

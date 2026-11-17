@@ -6,6 +6,9 @@ import {
   Target, Trash2, Upload, WandSparkles,
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
+import ImagePreparationPanel from './components/ImagePreparationPanel'
+import { adjustPlotImage, detectPlotAxes } from './lib/image-processing'
+import type { DetectedAxes, ImageAdjustments } from './lib/image-processing'
 import { downloadFile, pointToData, traceColor } from './lib/digitizer'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
 
@@ -41,11 +44,18 @@ const modeLabels: Record<ToolMode, string> = {
 
 export default function App() {
   const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const [sourceImageUrl, setSourceImageUrl] = useState<string | null>(null)
+  const [processedImageUrl, setProcessedImageUrl] = useState<string | null>(null)
+  const [showOriginalPreview, setShowOriginalPreview] = useState(false)
+  const [imagePrepared, setImagePrepared] = useState(false)
+  const [preprocessing, setPreprocessing] = useState(false)
+  const [axisDetection, setAxisDetection] = useState<DetectedAxes | null>(null)
+  const [dragActive, setDragActive] = useState(false)
   const [imageName, setImageName] = useState('Untitled plot')
   const [plotType, setPlotType] = useState<PlotType>('xy')
   const [datasets, setDatasets] = useState<Dataset[]>([defaultDataset(1)])
   const [activeId, setActiveId] = useState(datasets[0].id)
-  const [mode, setMode] = useState<ToolMode>('point')
+  const [mode, setMode] = useState<ToolMode>('select')
   const [xAxis, setXAxis] = useState<AxisCalibration>(blankAxis())
   const [yAxis, setYAxis] = useState<AxisCalibration>(blankAxis())
   const [xValue, setXValue] = useState('0')
@@ -61,6 +71,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
+  const openImageRef = useRef<(file?: File) => void>(() => undefined)
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -88,11 +99,62 @@ export default function App() {
     if (!file.type.startsWith('image/')) { showNotice('Choose a supported image file.', 'error'); return }
     if (file.size > 35 * 1024 * 1024) { showNotice('Images must be smaller than 35 MB.', 'error'); return }
     const nextUrl = URL.createObjectURL(file)
-    setImageUrl((previous) => { if (previous) URL.revokeObjectURL(previous); return nextUrl })
+    setImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
+    setSourceImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
+    setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(false); setAxisDetection(null)
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
     const initialDataset = defaultDataset(1)
     setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); setActiveId(initialDataset.id)
+    setMode('select')
+  }
+
+  openImageRef.current = openImage
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.type.startsWith('image/'))
+      const file = imageItem?.getAsFile()
+      if (!file) return
+      event.preventDefault()
+      openImageRef.current(file)
+    }
+    window.addEventListener('paste', handlePaste)
+    return () => window.removeEventListener('paste', handlePaste)
+  }, [])
+
+  const applyImageAdjustments = async (adjustments: ImageAdjustments) => {
+    if (!imageUrl) return
+    setPreprocessing(true)
+    try {
+      const nextImage = await adjustPlotImage(sourceImageUrl ?? imageUrl, adjustments)
+      setImageUrl(nextImage); setProcessedImageUrl(nextImage); setShowOriginalPreview(false)
+      setAxisDetection(null)
+      showNotice('Scan cleanup applied. Compare it with the original before continuing.')
+    } catch { showNotice('The image could not be processed in this browser.', 'error') }
+    finally { setPreprocessing(false) }
+  }
+
+  const confirmPreparedImage = () => {
+    if (showOriginalPreview && processedImageUrl) setShowOriginalPreview(false)
+    setImagePrepared(true)
     setMode('calibrate-x')
+    showNotice('Image confirmed. Continue by calibrating the axes.')
+  }
+
+  const detectAxes = async () => {
+    if (!imageUrl) return
+    try {
+      const detected = await detectPlotAxes(imageUrl)
+      if (!detected) { showNotice('Could not confidently find the bottom and left axes. Try cropping the chart or adjust the scan first.', 'error'); return }
+      setAxisDetection(detected)
+      const origin: CalPoint = { ...detected.intersection, value: xAxis.scale === 'date' ? Date.parse(xValue) : Number(xValue) }
+      const yOrigin: CalPoint = { ...detected.intersection, value: yAxis.scale === 'date' ? Date.parse(yValue) : Number(yValue) }
+      if (!Number.isFinite(origin.value) || !Number.isFinite(yOrigin.value)) { showNotice('Enter numeric axis values before detecting the origin.', 'error'); return }
+      setXAxis((current) => ({ ...current, points: [origin, ...current.points.slice(1)] }))
+      setYAxis((current) => ({ ...current, points: [yOrigin, ...current.points.slice(1)] }))
+      setMode('calibrate-x')
+      showNotice('Axes located near the lower and left edges. Their intersection was added as the first X/Y calibration point; verify it against the chart.')
+    } catch { showNotice('Axis detection failed while reading this image.', 'error') }
   }
 
   const updateDataset = (id: string, update: (dataset: Dataset) => Dataset) => setDatasets((current) => current.map((dataset) => dataset.id === id ? update(dataset) : dataset))
@@ -111,7 +173,7 @@ export default function App() {
   }
 
   const handleCanvasClick = async (point: PixelPoint) => {
-    if (!imageUrl) return
+    if (!imageUrl || !imagePrepared) return
     if (mode === 'calibrate-x' || mode === 'calibrate-y') {
       const current = mode === 'calibrate-x' ? xAxis : yAxis
       const rawValue = mode === 'calibrate-x' ? xValue : yValue
@@ -189,7 +251,9 @@ export default function App() {
     setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map(shiftPoint) })))
     setXAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
     setYAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
-    setImageUrl(canvas.toDataURL('image/png')); setMode('point'); showNotice('Image cropped. Calibration points outside the crop were removed.')
+    const croppedImage = canvas.toDataURL('image/png')
+    setImageUrl(croppedImage); setSourceImageUrl(croppedImage); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null)
+    setMode('point'); showNotice('Image cropped. Calibration points outside the crop were removed.')
   }
 
   const applyImageTransform = async (operation: 'rotate-left' | 'rotate-right' | 'flip-x' | 'flip-y') => {
@@ -216,7 +280,7 @@ export default function App() {
     setXAxis((current) => ({ ...current, points: current.points.map((point) => ({ ...transformPoint(point), value: point.value })) }))
     setYAxis((current) => ({ ...current, points: current.points.map((point) => ({ ...transformPoint(point), value: point.value })) }))
     const updated = canvas.toDataURL('image/png')
-    setImageUrl(updated)
+    setImageUrl(updated); setSourceImageUrl(updated); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null)
   }
 
   const getExportPoints = (dataset: Dataset) => dataset.points
@@ -275,7 +339,7 @@ export default function App() {
     try {
       const project = JSON.parse(await file.text())
       if (project.version !== 1 || !Array.isArray(project.datasets)) throw new Error('Unsupported project file')
-      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setPlotType(project.plotType || 'xy')
+      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.imageUrl || null); setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(Boolean(project.imageUrl)); setAxisDetection(null); setPlotType(project.plotType || 'xy')
       setXAxis(project.xAxis || blankAxis()); setYAxis(project.yAxis || blankAxis()); setDatasets(project.datasets)
       setActiveId(project.datasets[0]?.id ?? ''); setMode('point'); showNotice('Project opened successfully.')
     } catch { showNotice('That project file is invalid or unsupported.', 'error') }
@@ -314,12 +378,12 @@ export default function App() {
         <aside className="left-rail">
           <div className="rail-section"><div className="rail-heading"><span>TOOLS</span></div>
             <div className="tool-group-label">CALIBRATION</div>
-            <button className={`tool-button ${mode === 'calibrate-x' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('x')}><span className="tool-icon axis-x-icon">X</span><span>Calibrate X axis</span><kbd>{xAxis.points.length}/2</kbd></button>
-            <button className={`tool-button ${mode === 'calibrate-y' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('y')}><span className="tool-icon axis-y-icon">Y</span><span>Calibrate Y axis</span><kbd>{yAxis.points.length}/2</kbd></button>
+            <button className={`tool-button ${mode === 'calibrate-x' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('x')} disabled={!imagePrepared}><span className="tool-icon axis-x-icon">X</span><span>Calibrate X axis</span><kbd>{xAxis.points.length}/2</kbd></button>
+            <button className={`tool-button ${mode === 'calibrate-y' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('y')} disabled={!imagePrepared}><span className="tool-icon axis-y-icon">Y</span><span>Calibrate Y axis</span><kbd>{yAxis.points.length}/2</kbd></button>
             <div className="tool-group-label tool-gap">DIGITIZE</div>
-            <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
-            <button className={`tool-button ${mode === 'trace' ? 'selected' : ''}`} onClick={() => setMode('trace')}><span className="tool-icon"><WandSparkles size={16} /></span><span>Color trace</span><kbd>A</kbd></button>
-            <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => { if (activeDataset?.kind !== 'measurement') addDataset('measurement'); setMode('measure') }}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
+            <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
+            <button className={`tool-button ${mode === 'trace' ? 'selected' : ''}`} onClick={() => setMode('trace')} disabled={!imagePrepared}><span className="tool-icon"><WandSparkles size={16} /></span><span>Color trace</span><kbd>A</kbd></button>
+            <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => { if (activeDataset?.kind !== 'measurement') addDataset('measurement'); setMode('measure') }} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
               <div className="tool-group-label tool-gap">COMPRESSOR MAP</div>
               <button className={`tool-button ${mode === 'surge' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'surge'); if (target) setActiveId(target.id); else addDataset('surge'); setMode('surge') }}><span className="tool-icon boundary-icon">S</span><span>Surge boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
@@ -328,7 +392,7 @@ export default function App() {
               <button className={`tool-button ${activeDataset?.kind === 'efficiency' ? 'selected' : ''}`} onClick={() => addDataset('efficiency')}><span className="tool-icon"><Activity size={16} /></span><span>Efficiency contour</span></button>
             </>}
             <div className="tool-group-label tool-gap">IMAGE</div>
-            <button className={`tool-button ${mode === 'crop' ? 'selected' : ''}`} onClick={() => setMode('crop')} disabled={!imageUrl}><span className="tool-icon"><Crop size={16} /></span><span>Crop image</span></button>
+            <button className={`tool-button ${mode === 'crop' ? 'selected' : ''}`} onClick={() => setMode('crop')} disabled={!imagePrepared}><span className="tool-icon"><Crop size={16} /></span><span>Crop image</span></button>
             <button className="tool-button" onClick={() => imageInput.current?.click()}><span className="tool-icon"><ImagePlus size={16} /></span><span>Replace image</span></button>
             <div className="transform-grid"><button title="Rotate left" aria-label="Rotate left" onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /></button><button title="Rotate right" aria-label="Rotate right" onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /></button><button title="Flip horizontal" aria-label="Flip horizontal" onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /></button><button title="Flip vertical" aria-label="Flip vertical" onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /></button></div>
           </div>
@@ -338,24 +402,28 @@ export default function App() {
         <section className="center-workspace" aria-label="Plot workspace">
           <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right"><button title="Undo last point" onClick={() => activeDataset && updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) }))} disabled={!activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" className={showTable ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Digitize Surge and Choke first; speed-line traces stop when they meet a boundary.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
-          <div className="canvas-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); openImage(event.dataTransfer.files[0]) }}>
-            <PlotCanvas imageUrl={imageUrl} datasets={datasets} activeDatasetId={activeId} mode={mode} calibrationMarkers={[...xAxis.points, ...yAxis.points]} onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)} onCropSelection={(rect) => { void cropImage(rect) }} onMovePoint={(index, point) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) })) }} />
+          <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
+            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Processed scan' : 'Original image'} datasets={datasets} activeDatasetId={activeId} mode={mode} calibrationMarkers={[...xAxis.points, ...yAxis.points, ...(axisDetection ? [axisDetection.intersection] : [])]} onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)} onCropSelection={(rect) => { void cropImage(rect) }} onMovePoint={(index, point) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) })) }} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{modeLabels[mode]}</strong>{mode.startsWith('calibrate') ? ` · Click a chart tick and enter its value in the right panel.` : mode === 'trace' ? ' · Click the curve to sample its color and trace it.' : mode === 'speed' ? ' · Click a speed-line seed; trace ends at Surge/Choke.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Right-click a point to delete it.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode.startsWith('calibrate') ? ' · Click a chart tick and enter its value in the right panel.' : mode === 'trace' ? ' · Click the curve to sample its color and trace it.' : mode === 'speed' ? ' · Click a speed-line seed; trace ends at Surge/Choke.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Select one and use arrow keys; Shift moves 10 px.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select</span>}</div>
           {showTable && <div className="data-table-panel"><div className="data-table-head"><strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong><span>{calibrated ? `${calibratedPoints.length} points` : 'Set both axes to show data values'}</span></div><div className="data-table-scroll"><table><thead><tr><th>#</th><th>X</th><th>Y</th><th>Pixel X</th><th>Pixel Y</th></tr></thead><tbody>{(activeDataset?.points ?? []).slice(0, 120).map((point, index) => { const value = pointToData(point, xAxis, yAxis); return <tr key={`${point.x}-${point.y}-${index}`}><td>{index + 1}</td><td>{value ? formatAxisValue(value.x, xAxis.scale, precision) : '—'}</td><td>{value ? formatAxisValue(value.y, yAxis.scale, precision) : '—'}</td><td>{Math.round(point.x)}</td><td>{Math.round(point.y)}</td></tr> })}</tbody></table></div></div>}
         </section>
 
         <aside className="right-panel">
           <div className="panel-tabs"><button className={activePanel === 'data' ? 'active' : ''} onClick={() => setActivePanel('data')}><Layers size={14} /> Data</button><button className={activePanel === 'settings' ? 'active' : ''} onClick={() => setActivePanel('settings')}><Settings2 size={14} /> Settings</button></div>
           {activePanel === 'data' ? <div className="panel-content">
-            <section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 01</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
+            <ImagePreparationPanel hasImage={Boolean(imageUrl)} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} onApply={(adjustments) => { void applyImageAdjustments(adjustments) }} onToggleCompare={() => setShowOriginalPreview((current) => !current)} onContinue={confirmPreparedImage} />
+            {imagePrepared && <>
+            <section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
               <p className="section-copy">Click two known ticks on each axis and enter their values.</p>
               <AxisEditor axis="x" calibration={xAxis} setValue={setXValue} value={xValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} />
               <AxisEditor axis="y" calibration={yAxis} setValue={setYValue} value={yValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} />
+              <button className="axis-detect-button" onClick={() => { void detectAxes() }}><ScanSearch size={14} /> Auto-detect axes & origin</button>
+              {axisDetection && <p className="axis-detect-note">Intersection near {Math.round(axisDetection.intersection.x)}, {Math.round(axisDetection.intersection.y)} px · verify against the scan.</p>}
             </section>
             {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Map boundaries</strong><span>Speed lines require both boundaries first.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
-            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 02</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" onClick={() => addDataset()} title="Add dataset">+</button></div>
+            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" onClick={() => addDataset()} title="Add dataset">+</button></div>
               <div className="dataset-list">{datasets.map((dataset) => <div key={dataset.id} className={`dataset-card ${dataset.id === activeId ? 'active' : ''}`}>
                 <button className="dataset-select" onClick={() => { setActiveId(dataset.id); setMode(dataset.kind === 'surge' ? 'surge' : dataset.kind === 'choke' ? 'choke' : dataset.kind === 'speed' ? 'speed' : 'point') }} aria-label={`Select ${dataset.name}`}><span className="dataset-swatch" style={{ backgroundColor: dataset.color }} /><span className="dataset-meta"><span className="dataset-name">{dataset.name}</span><span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} RPM` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span></span><span className="dataset-point-count">{dataset.points.length}</span></button>
                 {dataset.id === activeId && <div className="dataset-controls"><input aria-label="Dataset name" value={dataset.name} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, name: event.target.value }))} /><label className="color-control" title="Dataset color"><input aria-label="Dataset color" type="color" value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label><button title="Export CSV" aria-label="Export CSV" onClick={() => exportDataset(dataset, 'csv')}><FileSpreadsheet size={14} /></button><button title="Delete dataset" aria-label={`Delete ${dataset.name}`} onClick={() => { if (datasets.length === 1) { updateDataset(dataset.id, (current) => ({ ...current, points: [] })); return } const next = datasets.filter((item) => item.id !== dataset.id); setDatasets(next); setActiveId(next[0].id) }}><Trash2 size={14} /></button></div>}
@@ -366,6 +434,7 @@ export default function App() {
             </section>
             {mode === 'trace' || mode === 'speed' ? <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">AUTO TRACE</span><h2>Color extraction</h2></div><ScanSearch size={16} /></div><p className="section-copy">Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</p><label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input type="range" min="12" max="180" value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label><label className="range-row"><span>X-step sampling</span><strong>{sampleStep}px</strong><input type="range" min="1" max="12" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label><div className="trace-hint"><Sparkles size={13} /> Seed from the canvas, then follow the closest matching pixels.</div></section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
+            </>}
           </div> : <div className="panel-content settings-content">
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={exportProject}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
@@ -377,7 +446,7 @@ export default function App() {
 
       <footer className="statusbar"><span className="statusbar-left"><span className="online-dot" /> READY <span className="statusbar-divider">/</span>{imageUrl ? imageName : 'Waiting for image'}</span><span className="statusbar-right"><span>{plotOptions.find((option) => option.id === plotType)?.label}</span><span>·</span><span>{calibrated ? 'Calibrated' : 'Uncalibrated'}</span><span>·</span><span>{totalPoints} points</span><span className="version-tag">v0.2</span></span></footer>
 
-      <input ref={imageInput} type="file" accept="image/*" className="visually-hidden" aria-label="Choose plot image" onChange={(event) => openImage(event.target.files?.[0])} />
+      <input ref={imageInput} type="file" accept="image/*" className="visually-hidden" aria-label="Choose plot image" onChange={(event) => { openImage(event.target.files?.[0]); event.target.value = '' }} />
       <input ref={projectInput} type="file" accept="application/json,.json" className="visually-hidden" aria-label="Open plot project" onChange={(event) => { void importProject(event.target.files?.[0]); event.target.value = '' }} />
       {notice && <div role="status" className={`toast ${notice.type ?? ''}`}><span className="toast-icon">{notice.type === 'error' ? '!' : <Check size={14} />}</span>{notice.message}<button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {loading && <div className="loading-overlay" aria-live="polite"><span className="loading-spinner" /> Following the curve…</div>}
