@@ -6,6 +6,7 @@ export interface ImageAdjustments {
   automaticThreshold: boolean
   invert: boolean
   sharpen: number
+  removeGrid: boolean
   separateGrid: boolean
   gridColor: string
 }
@@ -14,6 +15,22 @@ export interface DetectedPlotGrid {
   horizontalLines: number[]
   verticalLines: number[]
   confidence: number
+}
+
+export interface GridRemovalResult {
+  horizontalLines: number
+  verticalLines: number
+  removedPixels: number
+}
+
+export interface GridGuides {
+  horizontal: number[]
+  vertical: number[]
+}
+
+export interface ImageProcessingResult {
+  dataUrl: string
+  gridRemoval: GridRemovalResult | null
 }
 
 function findPlotGrid(data: Uint8ClampedArray, width: number, height: number): DetectedPlotGrid | null {
@@ -105,7 +122,101 @@ function recolorDetectedGrid(data: Uint8ClampedArray, width: number, height: num
   }
 }
 
-export async function adjustPlotImage(source: string, adjustments: ImageAdjustments): Promise<string> {
+export function removeDetectedGrid(data: Uint8ClampedArray, width: number, height: number, guides: GridGuides = { horizontal: [], vertical: [] }): GridRemovalResult | null {
+  const grid = findPlotGrid(data, width, height)
+  const combineGuidedLines = (detected: number[], guided: number[], limit: number) => {
+    const manual = [...new Set(guided.filter((position) => Number.isFinite(position) && position >= 0 && position < limit).map(Math.round))]
+    const automatic = detected.filter((position) => !manual.some((guide) => Math.abs(guide - position) <= 3))
+    return [...automatic, ...manual].sort((a, b) => a - b)
+  }
+  const horizontalLines = combineGuidedLines(grid?.horizontalLines.slice(1, -1) ?? [], guides.horizontal, height)
+  const verticalLines = combineGuidedLines(grid?.verticalLines.slice(1, -1) ?? [], guides.vertical, width)
+  if (!horizontalLines.length && !verticalLines.length) return null
+
+  const horizontalMask = new Uint8Array(height)
+  const verticalMask = new Uint8Array(width)
+  for (const y of horizontalLines) {
+    for (let offset = -1; offset <= 1; offset++) {
+      if (y + offset >= 0 && y + offset < height) horizontalMask[y + offset] = 1
+    }
+  }
+  for (const x of verticalLines) {
+    for (let offset = -1; offset <= 1; offset++) {
+      if (x + offset >= 0 && x + offset < width) verticalMask[x + offset] = 1
+    }
+  }
+
+  const original = new Uint8ClampedArray(data)
+  const isDark = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return false
+    const offset = (y * width + x) * 4
+    return original[offset] * 0.2126 + original[offset + 1] * 0.7152 + original[offset + 2] * 0.0722 < 175
+  }
+  const isCurveInk = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height
+    && horizontalMask[y] === 0 && verticalMask[x] === 0 && isDark(x, y)
+  const crossesCurve = (x: number, y: number) => {
+    for (let dx = 2; dx <= 9; dx++) {
+      for (let dy = 1; dy <= 6; dy++) {
+        for (const direction of [-1, 1]) {
+          let continues = true
+          for (let distance = 1; distance <= 2; distance++) {
+            const offsetX = distance * dx
+            const offsetY = direction * distance * dy
+            const before = [-1, 0, 1].some((offset) => isCurveInk(x - offsetX + offset, y - offsetY + offset))
+            const after = [-1, 0, 1].some((offset) => isCurveInk(x + offsetX + offset, y + offsetY + offset))
+            if (!before || !after) {
+              continues = false
+              break
+            }
+          }
+          if (continues) return true
+        }
+      }
+    }
+    return false
+  }
+  const sampleChannel = (x: number, y: number, channel: number) => {
+    const index = (y * width + x) * 4 + channel
+    return original[index]
+  }
+
+  let removedPixels = 0
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const onHorizontal = horizontalMask[y] === 1
+      const onVertical = verticalMask[x] === 1
+      if (!onHorizontal && !onVertical) continue
+      const index = (y * width + x) * 4
+      const brightness = original[index] * 0.2126 + original[index + 1] * 0.7152 + original[index + 2] * 0.0722
+      if (brightness >= 245 || crossesCurve(x, y)) continue
+
+      const samples: Array<[number, number]> = []
+      if (onHorizontal && onVertical) {
+        const left = Math.max(0, x - 3)
+        const right = Math.min(width - 1, x + 3)
+        const above = Math.max(0, y - 3)
+        const below = Math.min(height - 1, y + 3)
+        samples.push([left, above], [right, above], [left, below], [right, below])
+      } else if (onHorizontal) {
+        const above = Math.max(0, y - 3)
+        const below = Math.min(height - 1, y + 3)
+        samples.push([x, above], [x, below])
+      } else if (onVertical) {
+        const left = Math.max(0, x - 3)
+        const right = Math.min(width - 1, x + 3)
+        samples.push([left, y], [right, y])
+      }
+      for (let channel = 0; channel < 3; channel++) {
+        data[index + channel] = Math.round(samples.reduce((sum, [sampleX, sampleY]) => sum + sampleChannel(sampleX, sampleY, channel), 0) / samples.length)
+      }
+      removedPixels++
+    }
+  }
+
+  return { horizontalLines: horizontalLines.length, verticalLines: verticalLines.length, removedPixels }
+}
+
+export async function adjustPlotImage(source: string, adjustments: ImageAdjustments, gridGuides?: GridGuides): Promise<ImageProcessingResult> {
   const image = new Image()
   image.crossOrigin = 'anonymous'
   image.src = source
@@ -204,9 +315,10 @@ export async function adjustPlotImage(source: string, adjustments: ImageAdjustme
     data[index + 2] = blue
   }
 
+  const gridRemoval = adjustments.removeGrid ? removeDetectedGrid(data, width, height, gridGuides) : null
   if (adjustments.separateGrid) recolorDetectedGrid(data, width, height, adjustments.gridColor)
   context.putImageData(frame, 0, 0)
-  return canvas.toDataURL('image/png')
+  return { dataUrl: canvas.toDataURL('image/png'), gridRemoval }
 }
 
 export interface DetectedAxes {

@@ -8,7 +8,7 @@ import {
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
 import { adjustPlotImage, detectPlotAxes, detectPlotGrid } from './lib/image-processing'
-import type { DetectedAxes, DetectedPlotGrid, ImageAdjustments } from './lib/image-processing'
+import type { DetectedAxes, DetectedPlotGrid, GridGuides, ImageAdjustments } from './lib/image-processing'
 import { downloadFile, pointToData, traceColor } from './lib/digitizer'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
 
@@ -64,7 +64,8 @@ const modeLabels: Record<ToolMode, string> = {
   'calibrate-four': 'Four-point calibration', 'calibrate-edit': 'Modify calibration',
   point: 'Add data points', 'point-edit': 'Modify curve points',
   surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance',
-  trace: 'Find curve from seed', 'trace-region': 'Paint curve region', crop: 'Crop image',
+  trace: 'Find curve from seed', 'trace-region': 'Paint curve region',
+  'grid-horizontal': 'Guide horizontal grid', 'grid-vertical': 'Guide vertical grid', crop: 'Crop image',
 }
 
 export default function App() {
@@ -77,6 +78,7 @@ export default function App() {
   const [axisDetection, setAxisDetection] = useState<DetectedAxes | null>(null)
   const [gridDetection, setGridDetection] = useState<DetectedPlotGrid | null>(null)
   const [gridDetecting, setGridDetecting] = useState(false)
+  const [gridGuides, setGridGuides] = useState<GridGuides>({ horizontal: [], vertical: [] })
   const [dragActive, setDragActive] = useState(false)
   const [imageName, setImageName] = useState('Untitled plot')
   const [plotType, setPlotType] = useState<PlotType>('xy')
@@ -136,7 +138,7 @@ export default function App() {
     const nextUrl = URL.createObjectURL(file)
     setImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
     setSourceImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
-    setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(false); setAxisDetection(null); setGridDetection(null)
+    setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
     const initialDataset = defaultDataset(1)
     setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); setActiveId(initialDataset.id)
@@ -163,11 +165,19 @@ export default function App() {
     if (!imageUrl) return
     setPreprocessing(true)
     try {
-      const nextImage = await adjustPlotImage(sourceImageUrl ?? imageUrl, adjustments)
-      setImageUrl(nextImage); setProcessedImageUrl(nextImage); setShowOriginalPreview(false)
+      const result = await adjustPlotImage(sourceImageUrl ?? imageUrl, adjustments, gridGuides)
+      setImageUrl(result.dataUrl); setProcessedImageUrl(result.dataUrl); setShowOriginalPreview(false)
       setAxisDetection(null); setGridDetection(null)
-      showNotice('Scan cleanup applied. Compare it with the original before continuing.')
-    } catch { showNotice('The image could not be processed in this browser.', 'error') }
+      if (adjustments.removeGrid) {
+        if (result.gridRemoval) {
+          showNotice(`Processed ${result.gridRemoval.horizontalLines} horizontal and ${result.gridRemoval.verticalLines} vertical grid guides; ${result.gridRemoval.removedPixels.toLocaleString()} pixels were cleaned. Review curve crossings before continuing.`)
+        } else {
+          showNotice('No clear grid was detected. Other image adjustments were applied; try cropping or adjusting contrast.', 'error')
+        }
+      } else {
+        showNotice('Scan cleanup applied. Compare it with the original before continuing.')
+      }
+    } catch (error) { showNotice(error instanceof Error ? error.message : 'The image could not be processed in this browser.', 'error') }
     finally { setPreprocessing(false) }
   }
 
@@ -303,6 +313,12 @@ export default function App() {
         sampleStep,
         guide,
         traceBrushWidth / 2,
+        calibrated ? {
+          left: Math.min(...xAxis.points.map((point) => point.x)),
+          right: Math.max(...xAxis.points.map((point) => point.x)),
+          top: Math.min(...yAxis.points.map((point) => point.y)),
+          bottom: Math.max(...yAxis.points.map((point) => point.y)),
+        } : undefined,
       )
       const tracingSpeedLine = traceMode === 'speed' || (traceMode === 'trace-region' && activeDataset?.kind === 'speed')
       if (tracingSpeedLine) {
@@ -355,7 +371,15 @@ export default function App() {
   }
 
   const handleCanvasClick = async (point: PixelPoint) => {
-    if (!imageUrl || !imagePrepared) return
+    if (!imageUrl) return
+    if (mode === 'grid-horizontal' || mode === 'grid-vertical') {
+      const orientation = mode === 'grid-horizontal' ? 'horizontal' : 'vertical'
+      const position = orientation === 'horizontal' ? point.y : point.x
+      setGridGuides((current) => ({ ...current, [orientation]: [...current[orientation], position] }))
+      showNotice(`${orientation === 'horizontal' ? 'Horizontal' : 'Vertical'} grid guide added at ${Math.round(position)} px. Click other grid lines or switch back to Select.`)
+      return
+    }
+    if (!imagePrepared) return
     if (mode === 'calibrate-four') {
       const step = fourPointPixels.length
       const keys: (keyof FourPointValues)[] = ['x1', 'x2', 'y1', 'y2']
@@ -448,7 +472,7 @@ export default function App() {
     setXAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
     setYAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
     const croppedImage = canvas.toDataURL('image/png')
-    setImageUrl(croppedImage); setSourceImageUrl(croppedImage); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null); setGridDetection(null)
+    setImageUrl(croppedImage); setSourceImageUrl(croppedImage); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
     setMode('point'); showNotice('Image cropped. Calibration points outside the crop were removed.')
   }
 
@@ -476,7 +500,7 @@ export default function App() {
     setXAxis((current) => ({ ...current, points: current.points.map((point) => ({ ...transformPoint(point), value: point.value })) }))
     setYAxis((current) => ({ ...current, points: current.points.map((point) => ({ ...transformPoint(point), value: point.value })) }))
     const updated = canvas.toDataURL('image/png')
-    setImageUrl(updated); setSourceImageUrl(updated); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null); setGridDetection(null)
+    setImageUrl(updated); setSourceImageUrl(updated); setProcessedImageUrl(null); setShowOriginalPreview(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
   }
 
   const getExportPoints = (dataset: Dataset) => dataset.points
@@ -567,7 +591,7 @@ export default function App() {
     try {
       const project = JSON.parse(await file.text())
       if (project.version !== 1 || !Array.isArray(project.datasets)) throw new Error('Unsupported project file')
-      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.imageUrl || null); setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(Boolean(project.imageUrl)); setAxisDetection(null); setPlotType(project.plotType || 'xy'); setFourPointPixels([]); setCompressorAxes(project.compressorAxes || defaultCompressorAxes)
+      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.imageUrl || null); setProcessedImageUrl(null); setShowOriginalPreview(false); setImagePrepared(Boolean(project.imageUrl)); setAxisDetection(null); setGridGuides({ horizontal: [], vertical: [] }); setPlotType(project.plotType || 'xy'); setFourPointPixels([]); setCompressorAxes(project.compressorAxes || defaultCompressorAxes)
       setXAxis(project.xAxis || blankAxis()); setYAxis(project.yAxis || blankAxis()); setDatasets(project.datasets)
       setActiveId(project.datasets[0]?.id ?? ''); setMode('point'); showNotice('Project opened successfully.')
     } catch { showNotice('That project file is invalid or unsupported.', 'error') }
@@ -634,7 +658,7 @@ export default function App() {
           <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right"><button title="Undo last point" onClick={() => activeDataset && updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) }))} disabled={!activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" className={showTable ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
-            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Processed scan' : 'Original image'} datasets={datasets} activeDatasetId={activeId} mode={mode}
+            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Processed scan' : 'Original image'} datasets={datasets} activeDatasetId={activeId} mode={mode} gridGuides={!imagePrepared || mode === 'grid-horizontal' || mode === 'grid-vertical' ? gridGuides : { horizontal: [], vertical: [] }}
               calibrationMarkers={calibrationConfirmed && mode !== 'calibrate-edit' ? [] : [
                 ...xAxis.points.map((point, index) => ({ axis: 'x' as const, index, point, value: point.value, label: `X${index + 1}` })),
                 ...yAxis.points.map((point, index) => ({ axis: 'y' as const, index, point, value: point.value, label: `Y${index + 1}` })),
@@ -656,7 +680,7 @@ export default function App() {
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px.' : mode === 'trace-region' ? ' · Paint along the center of the curve; release to extract it.' : mode === 'trace' ? ' · Click a seed on the curve; the finder follows its shape.' : mode === 'speed' ? ' · Click or paint over a speed line; optional Surge/Choke boundaries stop the trace.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{!imageUrl ? 'Upload image' : !imagePrepared ? 'Prepare image' : modeLabels[mode]}</strong>{!imageUrl ? ' · Paste or drop a plot image, or choose a file.' : !imagePrepared ? ' · Adjust scan clarity, compare before/after, then confirm in Step 01.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ` · Click each ${mode === 'grid-horizontal' ? 'horizontal' : 'vertical'} grid line on the image; click the active guide button again to finish.` : mode === 'trace-region' ? ' · Paint along the center of the curve; release to extract it.' : mode === 'trace' ? ' · Click a seed on the curve; the finder follows its shape.' : mode === 'speed' ? ' · Click or paint over a speed line; optional Surge/Choke boundaries stop the trace.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -680,7 +704,7 @@ export default function App() {
         <aside className="right-panel">
           <div className="panel-tabs"><button className={activePanel === 'data' ? 'active' : ''} onClick={() => setActivePanel('data')}><Layers size={14} /> Data</button><button className={activePanel === 'settings' ? 'active' : ''} onClick={() => setActivePanel('settings')}><Settings2 size={14} /> Settings</button></div>
           {activePanel === 'data' ? <div className="panel-content">
-            <ImagePreparationPanel hasImage={Boolean(imageUrl)} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} onApply={(adjustments) => { void applyImageAdjustments(adjustments) }} onToggleCompare={() => setShowOriginalPreview((current) => !current)} onContinue={confirmPreparedImage} />
+            <ImagePreparationPanel hasImage={Boolean(imageUrl)} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} gridGuides={gridGuides} activeGridGuide={mode === 'grid-horizontal' ? 'horizontal' : mode === 'grid-vertical' ? 'vertical' : null} onSelectGridGuide={(orientation) => { const nextMode = orientation === 'horizontal' ? 'grid-horizontal' : 'grid-vertical'; setMode(mode === nextMode ? 'select' : nextMode) }} onClearGridGuides={() => { setGridGuides({ horizontal: [], vertical: [] }); if (mode === 'grid-horizontal' || mode === 'grid-vertical') setMode('select') }} onApply={(adjustments) => { void applyImageAdjustments(adjustments) }} onToggleCompare={() => setShowOriginalPreview((current) => !current)} onContinue={confirmPreparedImage} />
             {imagePrepared && <>
             <section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
               <p className="section-copy">Click two known ticks on each axis and enter their values.</p>

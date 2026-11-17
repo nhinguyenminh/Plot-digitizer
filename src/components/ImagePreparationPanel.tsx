@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Check, Eye, EyeOff, ScanSearch, SlidersHorizontal, WandSparkles } from 'lucide-react'
-import type { ImageAdjustments } from '../lib/image-processing'
+import type { GridGuides, ImageAdjustments } from '../lib/image-processing'
 import './ImagePreparationPanel.css'
 
 interface Props {
@@ -8,18 +8,22 @@ interface Props {
   hasProcessedImage: boolean
   showingOriginal: boolean
   processing: boolean
+  gridGuides: GridGuides
+  activeGridGuide: 'horizontal' | 'vertical' | null
   onApply: (adjustments: ImageAdjustments) => void
   onToggleCompare: () => void
   onContinue: () => void
+  onSelectGridGuide: (orientation: 'horizontal' | 'vertical') => void
+  onClearGridGuides: () => void
 }
 
 const initialAdjustments: ImageAdjustments = {
   brightness: 0, contrast: 0, grayscale: false, threshold: 255,
   automaticThreshold: false, invert: false, sharpen: 0,
-  separateGrid: false, gridColor: '#b9a7ff',
+  removeGrid: false, separateGrid: false, gridColor: '#b9a7ff',
 }
 
-export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, onApply, onToggleCompare, onContinue }: Props) {
+export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, gridGuides, activeGridGuide, onApply, onToggleCompare, onContinue, onSelectGridGuide, onClearGridGuides }: Props) {
   const [adjustments, setAdjustments] = useState(initialAdjustments)
   const update = (patch: Partial<ImageAdjustments>) => setAdjustments((current) => ({ ...current, ...patch }))
 
@@ -38,6 +42,16 @@ export default function ImagePreparationPanel({ hasImage, hasProcessedImage, sho
         <label className="range-row prep-range"><span>Manual threshold</span><strong>{adjustments.threshold === 255 ? 'Off' : adjustments.threshold}</strong><input aria-label="Background cleanup threshold" type="range" min="120" max="255" value={adjustments.threshold} disabled={adjustments.automaticThreshold} onChange={(event) => update({ threshold: Number(event.target.value), automaticThreshold: false })} /></label>
         <label className="range-row prep-range"><span>Sharpen details</span><strong>{adjustments.sharpen}%</strong><input aria-label="Image sharpening" type="range" min="0" max="100" value={adjustments.sharpen} onChange={(event) => update({ sharpen: Number(event.target.value) })} /></label>
         <label className="prep-check"><input type="checkbox" checked={adjustments.invert} onChange={(event) => update({ invert: event.target.checked })} /><span>Invert colors</span></label>
+        <label className="prep-check"><input type="checkbox" checked={adjustments.removeGrid} onChange={(event) => update({ removeGrid: event.target.checked })} /><span>Remove detected grid lines (keep curves)</span></label>
+        <p className="grid-removal-note">Finds long horizontal and vertical lines, fills their background, and preserves likely curve crossings. Click the guide buttons, then mark the center of grid lines missed by detection. Review the result before digitizing.</p>
+        <div className="grid-guide-controls">
+          <span>Grid guides · optional</span>
+          <div>
+            <button type="button" className={activeGridGuide === 'horizontal' ? 'active' : ''} onClick={() => { update({ removeGrid: true }); onSelectGridGuide('horizontal') }}>{activeGridGuide === 'horizontal' ? 'Click horizontal lines…' : 'Guide horizontal'}</button>
+            <button type="button" className={activeGridGuide === 'vertical' ? 'active' : ''} onClick={() => { update({ removeGrid: true }); onSelectGridGuide('vertical') }}>{activeGridGuide === 'vertical' ? 'Click vertical lines…' : 'Guide vertical'}</button>
+          </div>
+          <small>{gridGuides.horizontal.length} horizontal · {gridGuides.vertical.length} vertical{gridGuides.horizontal.length + gridGuides.vertical.length ? <button type="button" onClick={onClearGridGuides}>Clear guides</button> : null}</small>
+        </div>
         <label className="prep-check"><input type="checkbox" checked={adjustments.separateGrid} onChange={(event) => update({ separateGrid: event.target.checked })} /><span>Recolor detected grid lines</span><input aria-label="Grid line highlight color" className="grid-color-input" type="color" value={adjustments.gridColor} onChange={(event) => update({ gridColor: event.target.value })} /></label>
         <div className="prep-actions">
           <button className="prep-apply" onClick={() => onApply(adjustments)} disabled={processing}>

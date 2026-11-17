@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'trace-region' | 'crop'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'crop'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
@@ -113,12 +113,24 @@ function simplifyTrace(points: PixelPoint[], tolerance: number, maxSegmentLength
   return points.filter((_, index) => keep[index] === 1)
 }
 
-export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: number, step: number, guide?: PixelPoint[], guideRadius = 16): PixelPoint[] {
+export function traceColor(
+  imageData: ImageData,
+  seed: PixelPoint,
+  tolerance: number,
+  step: number,
+  guide?: PixelPoint[],
+  guideRadius = 16,
+  bounds: { left: number; right: number; top: number; bottom: number } = { left: 0, right: imageData.width - 1, top: 0, bottom: imageData.height - 1 },
+): PixelPoint[] {
   const { width, height, data } = imageData
-  const sx = Math.max(0, Math.min(width - 1, Math.round(seed.x)))
+  const leftBound = Math.max(0, Math.min(width - 1, Math.round(bounds.left)))
+  const rightBound = Math.max(leftBound, Math.min(width - 1, Math.round(bounds.right)))
+  const topBound = Math.max(0, Math.min(height - 1, Math.round(bounds.top)))
+  const bottomBound = Math.max(topBound, Math.min(height - 1, Math.round(bounds.bottom)))
+  const sx = Math.max(leftBound, Math.min(rightBound, Math.round(seed.x)))
   const sortedGuide = guide?.length ? [...guide].sort((a, b) => a.x - b.x) : null
-  const guideMinX = sortedGuide?.[0].x ?? 0
-  const guideMaxX = sortedGuide?.[sortedGuide.length - 1].x ?? width - 1
+  const guideMinX = Math.max(leftBound, sortedGuide?.[0].x ?? leftBound)
+  const guideMaxX = Math.min(rightBound, sortedGuide?.[sortedGuide.length - 1].x ?? rightBound)
   const guideAt = (x: number) => {
     if (!sortedGuide?.length) return null
     if (x <= sortedGuide[0].x) return sortedGuide[0]
@@ -131,7 +143,7 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
     return { x, y: start.y + (end.y - start.y) * ratio }
   }
   const nearestGuide = sortedGuide?.reduce((best, point) => Math.abs(point.x - sx) < Math.abs(best.x - sx) ? point : best)
-  const sy = Math.max(0, Math.min(height - 1, Math.round(nearestGuide?.y ?? seed.y)))
+  const sy = Math.max(topBound, Math.min(bottomBound, Math.round(nearestGuide?.y ?? seed.y)))
   const seedOffset = (sy * width + sx) * 4
   const stride = Math.max(1, Math.round(step))
   const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
@@ -146,8 +158,8 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
       let guideColor: number[] | null = null
       let highestSaturation = 24
       let saturatedGuideColor: number[] | null = null
-      for (let x = Math.max(0, Math.round(center.x) - Math.max(1, Math.floor(stride / 2))); x <= Math.min(width - 1, Math.round(center.x) + Math.max(1, Math.floor(stride / 2))); x++) {
-        for (let y = Math.max(0, Math.round(center.y) - guideRadius); y <= Math.min(height - 1, Math.round(center.y) + guideRadius); y++) {
+      for (let x = Math.max(leftBound, Math.round(center.x) - Math.max(1, Math.floor(stride / 2))); x <= Math.min(rightBound, Math.round(center.x) + Math.max(1, Math.floor(stride / 2))); x++) {
+        for (let y = Math.max(topBound, Math.round(center.y) - guideRadius); y <= Math.min(bottomBound, Math.round(center.y) + guideRadius); y++) {
           const offset = (y * width + x) * 4
           const red = data[offset]
           const green = data[offset + 1]
@@ -188,8 +200,8 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
       const guidedSlope = guideNext && guidePrevious && x !== last.x ? (guideNext.y - guidePrevious.y) / (x - last.x) : 0
       const slope = previous ? (last.y - previous.y) / (last.x - previous.x) : guidedSlope
       const baseRadius = Math.min(
-        Math.max(12, Math.round(height * 0.08)) + Math.ceil(Math.abs(slope * stride)),
-        Math.max(12, Math.round(height * 0.2)),
+        Math.max(6, Math.round(height * 0.025)) + Math.ceil(Math.abs(slope * stride) * 0.5),
+        Math.max(10, Math.round(height * 0.05)),
       )
       const older = points.length > 2 ? points[points.length - 3] : null
       const previousSlope = older && previous ? (previous.y - older.y) / (previous.x - older.x) : slope
@@ -202,11 +214,12 @@ export function traceColor(imageData: ImageData, seed: PixelPoint, tolerance: nu
       const radius = guideNext ? Math.max(3, Math.round(guideRadius)) : baseRadius
       let best: PixelPoint | null = null
       let bestScore = Infinity
-      for (let y = Math.max(0, Math.round(predictedY) - radius); y <= Math.min(height - 1, Math.round(predictedY) + radius); y++) {
+      for (let y = Math.max(topBound, Math.round(predictedY) - radius); y <= Math.min(bottomBound, Math.round(predictedY) + radius); y++) {
         const index = (y * width + x) * 4
         const distance = Math.hypot(data[index] - target[0], data[index + 1] - target[1], data[index + 2] - target[2])
         if (distance > tolerance) continue
-        const score = distance + Math.abs(y - predictedY) * (guideNext ? 1.5 : 0.8)
+        const offPrediction = Math.abs(y - predictedY)
+        const score = distance + offPrediction * (guideNext ? 4 : 1.5)
         if (score < bestScore) {
           bestScore = score
           best = { x, y }

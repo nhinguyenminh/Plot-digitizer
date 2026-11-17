@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { pointToData } from '../lib/digitizer'
+import type { GridGuides } from '../lib/image-processing'
 import type { AxisCalibration, Dataset, PixelPoint, ScaleType, ToolMode } from '../lib/digitizer'
 
 interface CalibrationMarker {
@@ -16,6 +17,7 @@ interface Props {
   datasets: Dataset[]
   activeDatasetId: string
   mode: ToolMode
+  gridGuides: GridGuides
   onCanvasClick: (point: PixelPoint) => void
   onDeletePoint: (point: PixelPoint) => void
   calibrationMarkers: CalibrationMarker[]
@@ -37,13 +39,14 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatasetId, mode, onCanvasClick, onDeletePoint, calibrationMarkers, calibrationMarkerColor, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, onSeedColor, onCropSelection, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatasetId, mode, gridGuides, onCanvasClick, onDeletePoint, calibrationMarkers, calibrationMarkerColor, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, onSeedColor, onCropSelection, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
   const draggedPointRef = useRef<number | null>(null)
   const draggedCalibrationRef = useRef<{ axis: 'x' | 'y'; index: number } | null>(null)
   const traceStrokeRef = useRef<PixelPoint[]>([])
+  const lastSeedColorRef = useRef<[number, number, number] | null>(null)
   const suppressClickRef = useRef(false)
   const imageRef = useRef<HTMLImageElement | null>(null)
   const [cursor, setCursor] = useState<PixelPoint | null>(null)
@@ -132,19 +135,7 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       context.fillStyle = selected ? calibrationMarkerColor : axis === 'x' ? '#f0bd78' : '#9eb6ff'
       context.fillText(`${axis.toUpperCase()}${index + 1}`, labelRect.x + 4, labelRect.y + labelHeight / 2 + fontSize * 0.35)
     })
-    if (traceStroke.length > 1) {
-      context.save()
-      context.strokeStyle = '#ffffff'
-      context.globalAlpha = 0.6
-      context.lineWidth = Math.max(traceBrushWidth, image.width / 100)
-      context.lineCap = 'round'
-      context.lineJoin = 'round'
-      context.beginPath()
-      traceStroke.forEach((point, index) => index ? context.lineTo(point.x, point.y) : context.moveTo(point.x, point.y))
-      context.stroke()
-      context.restore()
-    }
-  }, [datasets, calibrationMarkers, activeDatasetId, selectedPointIndex, selectedCalibration, calibrationMarkerColor, traceStroke, traceBrushWidth])
+  }, [datasets, calibrationMarkers, activeDatasetId, selectedPointIndex, selectedCalibration, calibrationMarkerColor])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -346,9 +337,13 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
     if (shellBounds) setLensPosition({ x: Math.max(8, Math.min(shellBounds.width - 136, event.clientX - shellBounds.left + 14)), y: Math.max(8, Math.min(shellBounds.height - 148, event.clientY - shellBounds.top + 14)) })
     const sourceCanvas = sourceCanvasRef.current
     const sourceContext = sourceCanvas?.getContext('2d', { willReadFrequently: true })
-    if (sourceContext && point.x >= 0 && point.y >= 0 && point.x < sourceCanvas!.width && point.y < sourceCanvas!.height) {
+    if ((mode === 'trace' || mode === 'speed') && sourceContext && point.x >= 0 && point.y >= 0 && point.x < sourceCanvas!.width && point.y < sourceCanvas!.height) {
       const pixel = sourceContext.getImageData(Math.round(point.x), Math.round(point.y), 1, 1).data
-      onSeedColor([pixel[0], pixel[1], pixel[2]])
+      const color: [number, number, number] = [pixel[0], pixel[1], pixel[2]]
+      if (!lastSeedColorRef.current || color.some((channel, index) => channel !== lastSeedColorRef.current?.[index])) {
+        lastSeedColorRef.current = color
+        onSeedColor(color)
+      }
     }
   }
 
@@ -357,7 +352,18 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
       const stroke = traceStrokeRef.current
       traceStrokeRef.current = []
       setTraceStroke([])
-      if (stroke.length > 1) onTraceRegion(stroke)
+      if (stroke.length > 1) {
+        const middle = stroke[Math.floor(stroke.length / 2)]
+        const sourceCanvas = sourceCanvasRef.current
+        const sourceContext = sourceCanvas?.getContext('2d', { willReadFrequently: true })
+        if (sourceContext && middle.x >= 0 && middle.y >= 0 && middle.x < sourceCanvas!.width && middle.y < sourceCanvas!.height) {
+          const pixel = sourceContext.getImageData(Math.round(middle.x), Math.round(middle.y), 1, 1).data
+          const color: [number, number, number] = [pixel[0], pixel[1], pixel[2]]
+          lastSeedColorRef.current = color
+          onSeedColor(color)
+        }
+        onTraceRegion(stroke)
+      }
       return
     }
     if (draggedCalibrationRef.current) {
@@ -396,9 +402,11 @@ export default function PlotCanvas({ imageUrl, imageLabel, datasets, activeDatas
         <div className="canvas-scroll">
           <div className="canvas-scale" style={{ transform: `scale(${scale})` }}>
             <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Add or edit curve points, edit calibration markers, and use arrow keys to nudge a selected point; hold Shift to move ten pixels." />
-            {(cropRect || traceStroke.length > 1) && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true">
+            {(cropRect || traceStroke.length > 1 || gridGuides.horizontal.length > 0 || gridGuides.vertical.length > 0) && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true">
               {cropRect && <rect {...cropRect} />}
               {traceStroke.length > 1 && <polyline points={traceStroke.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke="#ffffff" strokeOpacity=".7" strokeWidth={traceBrushWidth} strokeLinecap="round" strokeLinejoin="round" />}
+              {gridGuides.horizontal.map((y, index) => <line key={`horizontal-${index}`} x1="0" x2={dimensions.width} y1={y} y2={y} stroke="#c7b5ff" strokeOpacity=".85" strokeWidth="1.5" strokeDasharray="8 5" />)}
+              {gridGuides.vertical.map((x, index) => <line key={`vertical-${index}`} x1={x} x2={x} y1="0" y2={dimensions.height} stroke="#c7b5ff" strokeOpacity=".85" strokeWidth="1.5" strokeDasharray="8 5" />)}
             </svg>}
           </div>
         </div>
