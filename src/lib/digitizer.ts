@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'crop'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
@@ -18,6 +18,27 @@ export interface Dataset {
   efficiencyValue?: number
 }
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
+
+export function calibrateFromIntersections(
+  intersections: [PixelPoint, PixelPoint],
+  values: [number, number, number, number],
+  xScale: ScaleType,
+  yScale: ScaleType,
+): { xAxis: AxisCalibration; yAxis: AxisCalibration } {
+  const valid = (value: number, scale: ScaleType) =>
+    Number.isFinite(value) && (scale !== 'log' || value > 0) && (scale !== 'inverse' || value !== 0)
+  if (!intersections.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+    || Math.abs(intersections[0].x - intersections[1].x) < 4
+    || Math.abs(intersections[0].y - intersections[1].y) < 4
+    || !values.every((value, index) => valid(value, index < 2 ? xScale : yScale))
+    || values[0] === values[1] || values[2] === values[3]) {
+    throw new Error('Choose intersections separated by at least 4 pixels on both axes and enter distinct values valid for each scale.')
+  }
+  return {
+    xAxis: { scale: xScale, points: intersections.map((point, index) => ({ ...point, value: values[index] })) },
+    yAxis: { scale: yScale, points: intersections.map((point, index) => ({ ...point, value: values[index + 2] })) },
+  }
+}
 
 const transformed = (value: number, scale: ScaleType) => {
   if (scale === 'log') {
@@ -83,6 +104,7 @@ function simplifyTrace(points: PixelPoint[], tolerance: number, maxSegmentLength
   const ranges: Array<[number, number]> = [[0, points.length - 1]]
   while (ranges.length) {
     const [start, end] = ranges.pop()!
+    if (end - start < 2) continue
     const a = points[start]
     const b = points[end]
     const dx = b.x - a.x
@@ -113,6 +135,10 @@ function simplifyTrace(points: PixelPoint[], tolerance: number, maxSegmentLength
   return points.filter((_, index) => keep[index] === 1)
 }
 
+export function simplifyDetectedTrace(points: PixelPoint[], spacing: number): PixelPoint[] {
+  return simplifyTrace(smoothTrace(points, 1), 1, Math.max(1, spacing))
+}
+
 export function traceColor(
   imageData: ImageData,
   seed: PixelPoint,
@@ -121,6 +147,7 @@ export function traceColor(
   guide?: PixelPoint[],
   guideRadius = 16,
   bounds: { left: number; right: number; top: number; bottom: number } = { left: 0, right: imageData.width - 1, top: 0, bottom: imageData.height - 1 },
+  adaptiveSpacing = false,
 ): PixelPoint[] {
   const { width, height, data } = imageData
   const leftBound = Math.max(0, Math.min(width - 1, Math.round(bounds.left)))
@@ -143,9 +170,9 @@ export function traceColor(
     return { x, y: start.y + (end.y - start.y) * ratio }
   }
   const nearestGuide = sortedGuide?.reduce((best, point) => Math.abs(point.x - sx) < Math.abs(best.x - sx) ? point : best)
-  const sy = Math.max(topBound, Math.min(bottomBound, Math.round(nearestGuide?.y ?? seed.y)))
+  let sy = Math.max(topBound, Math.min(bottomBound, Math.round(nearestGuide?.y ?? seed.y)))
   const seedOffset = (sy * width + sx) * 4
-  const stride = Math.max(1, Math.round(step))
+  const stride = adaptiveSpacing ? 1 : Math.max(1, Math.round(step))
   const target = [data[seedOffset], data[seedOffset + 1], data[seedOffset + 2]]
   if (sortedGuide?.length) {
     const sampleCount = Math.min(11, sortedGuide.length)
@@ -168,6 +195,18 @@ export function traceColor(
           if (data[offset + 3] > 127 && brightness < darkest) {
             darkest = brightness
             guideColor = [red, green, blue]
+          }
+          if (adaptiveSpacing && sortedGuide) {
+            let bestY: number | null = null
+            let bestScore = Infinity
+            for (let y = Math.max(topBound, sy - guideRadius); y <= Math.min(bottomBound, sy + guideRadius); y++) {
+              const offset = (y * width + sx) * 4
+              const distance = Math.hypot(data[offset] - target[0], data[offset + 1] - target[1], data[offset + 2] - target[2])
+              const score = distance + Math.abs(y - sy) * 4
+              if (distance <= tolerance && score < bestScore) { bestY = y; bestScore = score }
+            }
+            if (bestY === null) return []
+            sy = bestY
           }
           const saturation = Math.max(red, green, blue) - Math.min(red, green, blue)
           if (data[offset + 3] > 127 && saturation > highestSaturation) {
@@ -228,7 +267,7 @@ export function traceColor(
       if (best) {
         points.push(best)
         misses = 0
-      } else if (++misses >= 2) {
+      } else if (++misses >= (adaptiveSpacing ? Math.max(2, Math.round(step) * 2) : 2)) {
         break
       }
     }
@@ -237,8 +276,10 @@ export function traceColor(
   const left = traceDirection(-1).reverse()
   const right = traceDirection(1).slice(1)
   const traced = [...left, ...right]
-  const smoothed = smoothTrace(traced, stride >= 6 ? 1 : 2)
-  return simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)), stride * 5)
+  const smoothed = smoothTrace(traced, adaptiveSpacing || stride >= 6 ? 1 : 2)
+  return adaptiveSpacing
+    ? simplifyTrace(smoothed, 0.5, Math.max(1, step))
+    : simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)), stride * 5)
 }
 
 export function downloadFile(name: string, content: string, mime = 'text/plain') {

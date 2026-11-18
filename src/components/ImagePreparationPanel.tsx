@@ -1,6 +1,8 @@
-import { useState } from 'react'
-import { Check, Eye, EyeOff, ScanSearch, SlidersHorizontal, WandSparkles } from 'lucide-react'
-import type { GridGuides, ImageAdjustments } from '../lib/image-processing'
+import { Check, Eye, ScanSearch, WandSparkles } from 'lucide-react'
+import type { GridGuides } from '../lib/image-processing'
+import type { ToolMode } from '../lib/digitizer'
+import type { AxisGuides, CorrectionLayer, ReconstructionWidths, UpscaleSetting } from '../lib/reconstruct'
+import { ERASER_MIN_WIDTH, ERASER_MAX_WIDTH } from '../lib/reconstruct'
 import './ImagePreparationPanel.css'
 
 interface Props {
@@ -8,64 +10,89 @@ interface Props {
   hasProcessedImage: boolean
   showingOriginal: boolean
   processing: boolean
+  needsProcess: boolean
+  hasRegion: boolean
+  correctionCount: number
+  correctionLayer: CorrectionLayer
+  eraserWidth: number
+  drawWidth: number
+  upscale: UpscaleSetting
+  customLongEdge: string
+  widths: ReconstructionWidths
+  widthsRequireProcess: boolean
   gridGuides: GridGuides
-  activeGridGuide: 'horizontal' | 'vertical' | null
-  onApply: (adjustments: ImageAdjustments) => void
+  axisGuides: AxisGuides
+  regularGrid: boolean
+  mode: ToolMode
+  onProcess: () => void
   onToggleCompare: () => void
   onContinue: () => void
-  onSelectGridGuide: (orientation: 'horizontal' | 'vertical') => void
+  onSelectTool: (mode: ToolMode) => void
+  onCorrectionLayerChange: (layer: CorrectionLayer) => void
+  onEraserWidthChange: (width: number) => void
+  onDrawWidthChange: (width: number) => void
+  onUpscaleChange: (setting: UpscaleSetting) => void
+  onCustomLongEdgeChange: (value: string) => void
+  onApplyCustomUpscale: () => void
+  onWidthsChange: (widths: ReconstructionWidths) => void
+  onClearRegion: () => void
   onClearGridGuides: () => void
+  onClearAxisGuides: () => void
+  onRegularGridChange: (enabled: boolean) => void
+  onUndoCorrection: () => void
 }
 
-const initialAdjustments: ImageAdjustments = {
-  brightness: 0, contrast: 0, grayscale: false, threshold: 255,
-  automaticThreshold: false, invert: false, sharpen: 0,
-  removeGrid: false, separateGrid: false, gridColor: '#b9a7ff',
-}
-
-export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, gridGuides, activeGridGuide, onApply, onToggleCompare, onContinue, onSelectGridGuide, onClearGridGuides }: Props) {
-  const [adjustments, setAdjustments] = useState(initialAdjustments)
-  const update = (patch: Partial<ImageAdjustments>) => setAdjustments((current) => ({ ...current, ...patch }))
-
-  return (
-    <section className="panel-section image-prep-section">
-      <div className="section-heading">
-        <div><span className="section-kicker">STEP 01 · FIRST</span><h2>Prepare scan</h2></div>
-        <span className="prep-step-icon"><SlidersHorizontal size={14} /></span>
+export default function ImagePreparationPanel({ hasImage, hasProcessedImage, showingOriginal, processing, needsProcess, hasRegion, correctionCount, correctionLayer, eraserWidth, drawWidth, upscale, customLongEdge, widths, widthsRequireProcess, gridGuides, axisGuides, regularGrid, mode, onProcess, onToggleCompare, onContinue, onSelectTool, onCorrectionLayerChange, onEraserWidthChange, onDrawWidthChange, onUpscaleChange, onCustomLongEdgeChange, onApplyCustomUpscale, onWidthsChange, onClearRegion, onClearGridGuides, onClearAxisGuides, onRegularGridChange, onUndoCorrection }: Props) {
+  return <section className="panel-section image-prep-section">
+    <div className="section-heading"><div><span className="section-kicker">STEP 01 · FIRST</span><h2>Process image</h2></div><span className="prep-step-icon"><WandSparkles size={14} /></span></div>
+    <p className="section-copy">Rebuild lines on a white background, then compare and correct them. This is an experimental detector: check every curve and intersection.</p>
+    {!hasImage ? <div className="prep-empty"><ScanSearch size={17} /><span>Paste, drop, or choose a plot image to begin.</span></div> : <>
+      <button className="prep-apply prep-main" onClick={onProcess} disabled={processing}><WandSparkles size={14} /> {processing ? 'Processing…' : 'Process image'}</button>
+      <div className="grid-guide-controls">
+        <label className="format-control"><span>Upscale reconstruction</span><select aria-label="Upscale reconstruction" disabled={processing} value={upscale.preset} onChange={(event) => onUpscaleChange({ ...upscale, preset: event.target.value as UpscaleSetting['preset'] })}><option value="original">Original size</option><option value="hd">HD (at least 1280 × 720)</option><option value="fullhd">Full HD (at least 1920 × 1080)</option><option value="custom">Custom long edge</option></select></label>
+        {upscale.preset === 'custom' && <label className="format-control"><span>Long edge (128–4096 px)</span><input aria-label="Upscale long edge" type="number" min="128" max="4096" step="1" value={customLongEdge} onChange={(event) => onCustomLongEdgeChange(event.target.value)} /><button disabled={processing} onClick={onApplyCustomUpscale}>Apply</button></label>}
+        <small>Aspect ratio and source coordinates are retained. Upscaling improves rendering, not source detail.</small>
       </div>
-      <p className="section-copy">Clean up a low-quality scan before marking axes or tracing curves. Your image stays in this browser.</p>
-      {!hasImage ? <div className="prep-empty"><ScanSearch size={17} /><span>Paste, drop, or choose a plot image to begin.</span></div> : <>
-        <label className="range-row prep-range"><span>Brightness</span><strong>{adjustments.brightness}</strong><input aria-label="Image brightness" type="range" min="-80" max="80" value={adjustments.brightness} onChange={(event) => update({ brightness: Number(event.target.value) })} /></label>
-        <label className="range-row prep-range"><span>Contrast</span><strong>{adjustments.contrast}</strong><input aria-label="Image contrast" type="range" min="-80" max="120" value={adjustments.contrast} onChange={(event) => update({ contrast: Number(event.target.value) })} /></label>
-        <label className="prep-check"><input type="checkbox" checked={adjustments.grayscale} onChange={(event) => update({ grayscale: event.target.checked })} /><span>Convert to grayscale</span></label>
-        <label className="prep-check"><input type="checkbox" checked={adjustments.automaticThreshold} onChange={(event) => update({ automaticThreshold: event.target.checked })} /><span>Automatic background threshold</span></label>
-        <label className="range-row prep-range"><span>Manual threshold</span><strong>{adjustments.threshold === 255 ? 'Off' : adjustments.threshold}</strong><input aria-label="Background cleanup threshold" type="range" min="120" max="255" value={adjustments.threshold} disabled={adjustments.automaticThreshold} onChange={(event) => update({ threshold: Number(event.target.value), automaticThreshold: false })} /></label>
-        <label className="range-row prep-range"><span>Sharpen details</span><strong>{adjustments.sharpen}%</strong><input aria-label="Image sharpening" type="range" min="0" max="100" value={adjustments.sharpen} onChange={(event) => update({ sharpen: Number(event.target.value) })} /></label>
-        <label className="prep-check"><input type="checkbox" checked={adjustments.invert} onChange={(event) => update({ invert: event.target.checked })} /><span>Invert colors</span></label>
-        <label className="prep-check"><input type="checkbox" checked={adjustments.removeGrid} onChange={(event) => update({ removeGrid: event.target.checked })} /><span>Remove detected grid lines (keep curves)</span></label>
-        <p className="grid-removal-note">Finds long horizontal and vertical lines, fills their background, and preserves likely curve crossings. Click the guide buttons, then mark the center of grid lines missed by detection. Review the result before digitizing.</p>
-        <div className="grid-guide-controls">
-          <span>Grid guides · optional</span>
-          <div>
-            <button type="button" className={activeGridGuide === 'horizontal' ? 'active' : ''} onClick={() => { update({ removeGrid: true }); onSelectGridGuide('horizontal') }}>{activeGridGuide === 'horizontal' ? 'Click horizontal lines…' : 'Guide horizontal'}</button>
-            <button type="button" className={activeGridGuide === 'vertical' ? 'active' : ''} onClick={() => { update({ removeGrid: true }); onSelectGridGuide('vertical') }}>{activeGridGuide === 'vertical' ? 'Click vertical lines…' : 'Guide vertical'}</button>
-          </div>
-          <small>{gridGuides.horizontal.length} horizontal · {gridGuides.vertical.length} vertical{gridGuides.horizontal.length + gridGuides.vertical.length ? <button type="button" onClick={onClearGridGuides}>Clear guides</button> : null}</small>
+      {(['curve', 'grid'] as const).map((kind) => <label className="range-row" key={kind}><span>{kind === 'grid' ? 'Grid and axis' : 'Curve'} thickness</span><strong>{widths[kind]} px</strong><input aria-label={`Process ${kind} thickness`} type="range" min="0.5" max="8" step="0.5" disabled={processing} value={widths[kind]} onChange={(event) => onWidthsChange({ ...widths, [kind]: Number(event.target.value) })} /></label>)}
+      {widthsRequireProcess && <small>Thickness applies when you press Process image.</small>}
+      <div className="grid-guide-controls">
+        <span>Define the plot area, then guide the grid and axes on the original image.</span>
+        <div>
+          <button className={mode === 'prep-region' ? 'active' : ''} onClick={() => onSelectTool('prep-region')}>Select plot area</button>
+          <button onClick={onClearRegion} disabled={!hasRegion}>Use full image</button>
+          <button className={mode === 'grid-horizontal' ? 'active' : ''} onClick={() => onSelectTool('grid-horizontal')}>Guide horizontal</button>
+          <button className={mode === 'grid-vertical' ? 'active' : ''} onClick={() => onSelectTool('grid-vertical')}>Guide vertical</button>
+          <button className={mode === 'guide-axis-x' ? 'active' : ''} onClick={() => onSelectTool('guide-axis-x')}>Set X axis</button>
+          <button className={mode === 'guide-axis-y' ? 'active' : ''} onClick={() => onSelectTool('guide-axis-y')}>Set Y axis</button>
         </div>
-        <label className="prep-check"><input type="checkbox" checked={adjustments.separateGrid} onChange={(event) => update({ separateGrid: event.target.checked })} /><span>Recolor detected grid lines</span><input aria-label="Grid line highlight color" className="grid-color-input" type="color" value={adjustments.gridColor} onChange={(event) => update({ gridColor: event.target.value })} /></label>
+        <label><input type="checkbox" checked={regularGrid} disabled={processing} onChange={(event) => onRegularGridChange(event.target.checked)} /> Rebuild a regular grid from consecutive guides</label>
+        <span>For each direction, click at least two adjacent grid lines. Select the plot area to limit the rebuilt grid. One guide adjusts only that line.</span>
+        <small>{gridGuides.horizontal.length} horizontal · {gridGuides.vertical.length} vertical <button onClick={onClearGridGuides} disabled={!gridGuides.horizontal.length && !gridGuides.vertical.length}>Clear guides</button></small>
+        <small>X axis: {axisGuides.horizontal === null ? 'auto' : `${Math.round(axisGuides.horizontal)} px`} · Y axis: {axisGuides.vertical === null ? 'auto' : `${Math.round(axisGuides.vertical)} px`} <button onClick={onClearAxisGuides} disabled={axisGuides.horizontal === null && axisGuides.vertical === null}>Clear axes</button></small>
+      </div>
+      {hasProcessedImage && <>
         <div className="prep-actions">
-          <button className="prep-apply" onClick={() => onApply(adjustments)} disabled={processing}>
-            <WandSparkles size={14} /> {processing ? 'Preparing…' : hasProcessedImage ? 'Update processed image' : 'Apply cleanup'}
-          </button>
-          {hasProcessedImage && <button className="prep-compare" onClick={onToggleCompare} aria-pressed={!showingOriginal}>
-            {showingOriginal ? <Eye size={14} /> : <EyeOff size={14} />} {showingOriginal ? 'Show processed' : 'Compare original'}
-          </button>}
+          <button className="prep-compare" onClick={onToggleCompare}><Eye size={14} /> {showingOriginal ? 'Show reconstruction' : 'Compare original'}</button>
+          <button className="prep-compare" onClick={onUndoCorrection} disabled={!correctionCount}>Undo edit</button>
         </div>
-        {hasProcessedImage && <p className="prep-compare-note">{showingOriginal ? 'Showing the untouched scan.' : 'Showing the cleaned image.'} Compare both, then confirm when the axes and curves look clear.</p>}
-        <button className="prep-continue" onClick={onContinue} disabled={processing}>
-          <Check size={14} /> Confirm image & continue
-        </button>
+        <div className="grid-guide-controls">
+          <span>Fine-tune one layer at a time</span>
+          <div role="group" aria-label="Fine-tune layer">
+            <button className={correctionLayer === 'curve' ? 'active' : ''} aria-pressed={correctionLayer === 'curve'} onClick={() => onCorrectionLayerChange('curve')}>Curve layer</button>
+            <button className={correctionLayer === 'grid' ? 'active' : ''} aria-pressed={correctionLayer === 'grid'} onClick={() => onCorrectionLayerChange('grid')}>Grid / axis layer</button>
+          </div>
+          <div>
+            <button className={mode === 'prep-draw' ? 'active' : ''} onClick={() => onSelectTool('prep-draw')}>Draw</button>
+            <button className={mode === 'prep-line' ? 'active' : ''} onClick={() => onSelectTool('prep-line')}>Draw straight line</button>
+            <button className={mode === 'prep-erase' ? 'active' : ''} onClick={() => onSelectTool('prep-erase')}>Erase marks</button>
+          </div>
+          <label className="range-row"><span>Eraser width</span><strong>{eraserWidth} px</strong><input aria-label="Eraser width" type="range" min={ERASER_MIN_WIDTH} max={ERASER_MAX_WIDTH} step="1" value={eraserWidth} disabled={processing} onChange={(event) => onEraserWidthChange(Number(event.target.value))} /></label>
+          <label className="range-row"><span>Draw / line width</span><strong>{drawWidth} px</strong><input aria-label="Draw and line width" type="range" min="0.5" max="8" step="0.5" value={drawWidth} disabled={processing} onChange={(event) => onDrawWidthChange(Number(event.target.value))} /></label>
+          <small>{correctionCount} edits · erase affects only the selected layer</small>
+        </div>
+        <p className="prep-compare-note">{showingOriginal ? 'Showing original scan.' : 'Showing reconstruction.'} {needsProcess ? 'Region or guides changed; press Process image again.' : 'Curves and text may be missed or confused; inspect before continuing.'}</p>
       </>}
-    </section>
-  )
+      <button className="prep-continue" onClick={onContinue} disabled={processing || !hasProcessedImage || needsProcess}><Check size={14} /> Confirm image & continue</button>
+    </>}
+  </section>
 }
