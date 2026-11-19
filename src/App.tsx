@@ -118,9 +118,9 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false)
   const [imageName, setImageName] = useState('Untitled plot')
   const [plotType, setPlotType] = useState<PlotType>('xy')
-  const [datasets, setDatasets] = useState<Dataset[]>([defaultDataset(1)])
-  const [activeId, setActiveId] = useState(datasets[0].id)
-  const [selectedDatasetIds, setSelectedDatasetIds] = useState<string[]>([datasets[0].id])
+  const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [activeId, setActiveId] = useState('')
+  const [selectedDatasetIds, setSelectedDatasetIds] = useState<string[]>([])
   const [editingDatasetName, setEditingDatasetName] = useState<{ id: string; value: string } | null>(null)
   const [datasetDropTarget, setDatasetDropTarget] = useState<{ id: string; after: boolean } | null>(null)
   const [pointSelectionVersion, setPointSelectionVersion] = useState(0)
@@ -202,8 +202,7 @@ export default function App() {
     setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false); setShowBackground(true); setImagePrepared(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
     setPlotRegion(null); setAxisGuides({ horizontal: null, vertical: null }); setRegularGrid(true); setReconstruction(null); setCorrections([]); setNeedsProcess(true)
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
-    const initialDataset = defaultDataset(1)
-    setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); activateDataset(initialDataset.id)
+    setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([]); activateDataset('')
     setCompressorAxes(defaultCompressorAxes)
     setFourPointPixels([])
     setWorkflowStep('image'); setCalibrationConfirmed(false); setBrushErasing(false)
@@ -450,11 +449,10 @@ export default function App() {
     const remaining = datasets.filter((dataset) => !selectedDatasetIds.includes(dataset.id))
     const message = remaining.length
       ? `Delete ${selectedDatasetIds.length} selected datasets and all their points?`
-      : `Delete all ${selectedDatasetIds.length} selected datasets and their points? A new empty dataset will be created.`
+      : `Delete all ${selectedDatasetIds.length} selected datasets and their points?`
     if (!window.confirm(message)) return
-    const next = remaining.length ? remaining : [defaultDataset(1, plotType === 'compressor' ? 'speed' : 'curve')]
-    setDatasets(next)
-    activateDataset(next[0].id)
+    setDatasets(remaining)
+    activateDataset(remaining[0]?.id ?? '')
     setPointSelectionVersion((version) => version + 1)
     showNotice(`Deleted ${selectedDatasetIds.length} datasets.`)
   }
@@ -787,7 +785,18 @@ export default function App() {
       return
     }
     if (mode === 'surge' || mode === 'choke' || mode === 'point' || mode === 'measure') {
-      if (!activeDataset) return
+      const kind: DatasetKind = mode === 'surge' || mode === 'choke'
+        ? mode
+        : mode === 'measure'
+          ? 'measurement'
+          : 'curve'
+      if (!activeDataset || (kind !== 'curve' && activeDataset.kind !== kind)) {
+        const next = defaultDataset(datasets.length + 1, kind)
+        next.points = [point]
+        setDatasets((current) => [...current, next])
+        activateDataset(next.id)
+        return
+      }
       updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: [...dataset.points, point] }))
     }
   }
@@ -808,11 +817,6 @@ export default function App() {
   const deleteDataset = (id: string) => {
     if (pendingTrace && !pendingTrace.ids.includes(id)) return
     setEditingDatasetName(null)
-    if (datasets.length === 1) {
-      updateDataset(id, (dataset) => ({ ...dataset, points: [] }))
-      setPointSelectionVersion((version) => version + 1)
-      return
-    }
     const remaining = datasets.filter((dataset) => dataset.id !== id)
     setDatasets(remaining)
     if (pendingTrace) {
@@ -825,8 +829,9 @@ export default function App() {
         setPendingTrace({ ...pendingTrace, ids })
         if (activeId === id) activateDataset(ids[0])
       }
-    } else if (activeId === id) activateDataset(remaining[0].id)
+    } else if (activeId === id) activateDataset(remaining[0]?.id ?? '')
     else setSelectedDatasetIds((current) => current.filter((item) => item !== id))
+    setPointSelectionVersion((version) => version + 1)
   }
 
   const cropImage = async (rect: { x: number; y: number; width: number; height: number }) => {
@@ -1143,11 +1148,11 @@ export default function App() {
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className="tool-button" onClick={retraceActiveDataset} disabled={!imagePrepared || loading || activePoints < 2}><span className="tool-icon"><ScanSearch size={16} /></span><span>Retrace edited curve</span></button>
-            <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => { if (activeDataset?.kind !== 'measurement') addDataset('measurement'); setMode('measure') }} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
+            <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => setMode('measure')} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
               <div className="tool-group-label tool-gap">COMPRESSOR MAP</div>
-              <button className={`tool-button ${mode === 'surge' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'surge'); if (target) activateDataset(target.id); else addDataset('surge'); setMode('surge') }}><span className="tool-icon boundary-icon">S</span><span>Surge boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
-              <button className={`tool-button ${mode === 'choke' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'choke'); if (target) activateDataset(target.id); else addDataset('choke'); setMode('choke') }}><span className="tool-icon boundary-icon choke-icon">C</span><span>Choke boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
+              <button className={`tool-button ${mode === 'surge' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'surge'); if (target) activateDataset(target.id); else activateDataset(''); setMode('surge') }}><span className="tool-icon boundary-icon">S</span><span>Surge boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
+              <button className={`tool-button ${mode === 'choke' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'choke'); if (target) activateDataset(target.id); else activateDataset(''); setMode('choke') }}><span className="tool-icon boundary-icon choke-icon">C</span><span>Choke boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
               <button className={`tool-button ${mode === 'speed' ? 'selected' : ''}`} onClick={() => addDataset('speed')}><span className="tool-icon"><Gauge size={16} /></span><span>New speed line</span><kbd>RPM</kbd></button>
               <button className={`tool-button ${activeDataset?.kind === 'efficiency' ? 'selected' : ''}`} onClick={() => addDataset('efficiency')}><span className="tool-icon"><Activity size={16} /></span><span>Efficiency contour</span></button>
             </>}
@@ -1346,7 +1351,7 @@ export default function App() {
                   </span>
                   <span className="dataset-point-count">{dataset.points.length}</span>
                 </div>
-                {(pendingTrace || selectedDatasetIds.length < 2) && <button className="dataset-delete" title={datasets.length === 1 ? 'Clear dataset points' : 'Delete dataset'} aria-label={`${datasets.length === 1 ? 'Clear' : 'Delete'} ${dataset.name}`} disabled={Boolean(pendingTrace && !pendingTrace.ids.includes(dataset.id))} onClick={() => deleteDataset(dataset.id)}><Trash2 size={14} /><span>{datasets.length === 1 ? 'Clear' : 'Delete'}</span></button>}
+                {(pendingTrace || selectedDatasetIds.length < 2) && <button className="dataset-delete" title="Delete dataset" aria-label={`Delete ${dataset.name}`} disabled={Boolean(pendingTrace && !pendingTrace.ids.includes(dataset.id))} onClick={() => deleteDataset(dataset.id)}><Trash2 size={14} /><span>Delete</span></button>}
                 </div>
                 {!pendingTrace && dataset.id === activeId && <div className="dataset-controls"><button title="Export CSV" aria-label="Export CSV" onClick={() => exportDataset(dataset, 'csv')}><FileSpreadsheet size={14} /></button></div>}
                 {!pendingTrace && dataset.kind === 'speed' && dataset.id === activeId && <>
