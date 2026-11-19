@@ -1,5 +1,5 @@
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase' | 'prep-heal'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
@@ -282,8 +282,8 @@ export function traceColor(
     : simplifyTrace(smoothed, Math.max(0.75, Math.min(3, stride * 0.3)), stride * 5)
 }
 
-export function downloadFile(name: string, content: string, mime = 'text/plain') {
-  const url = URL.createObjectURL(new Blob([content], { type: mime }))
+export function downloadFile(name: string, content: string | Blob, mime = 'text/plain') {
+  const url = URL.createObjectURL(content instanceof Blob ? content : new Blob([content], { type: mime }))
   const link = document.createElement('a')
   link.href = url
   link.download = name

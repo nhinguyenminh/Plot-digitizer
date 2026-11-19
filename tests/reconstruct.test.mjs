@@ -106,6 +106,7 @@ test('reconnects a curve that touches and follows a horizontal grid line', () =>
   for (let x = 20; x <= 140; x++) plot.mark(x, 60 - Math.min(8, Math.floor(Math.abs(x - 80) / 4)))
   const result = detectReconstruction(plot, { x: 10, y: 10, width: 140, height: 100 }, { horizontal: [], vertical: [] })
   assert.ok(result.curves.some((path) => path.some((p) => p.x < 77 && p.y < 60) && path.some((p) => p.x > 83 && p.y < 60) && path.some((p) => Math.abs(p.x - 80) <= 2 && p.y >= 59.5)))
+  assert.ok(result.estimatedCurves.some((index) => result.curves[index].length > 2))
 })
 
 test('reconnects compatible curve endpoints slightly away from a grid line', () => {
@@ -281,6 +282,73 @@ test('renders pixel-step curves with bounded smoothing and preserves endpoints a
     assert.deepEqual(rendered.at(-1), path.at(-1))
     assert.ok(rendered.some((point, index) => point.y !== path[index].y))
     assert.ok(rendered.every((point, index) => Math.hypot(point.x - path[index].x, point.y - path[index].y) <= 0.5))
+  } finally {
+    if (previous === undefined) delete globalThis.document
+    else globalThis.document = previous
+  }
+})
+
+test('reduces pixel stair-steps without shifting the detected path by more than half a source pixel', () => {
+  const previous = globalThis.document
+  const layers = []
+  globalThis.document = { createElement: () => {
+    const points = []
+    const context = {
+      fillRect() {}, save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, drawImage() {}, stroke() {},
+      moveTo(x, y) { points.push({ x, y }) }, lineTo(x, y) { points.push({ x, y }) },
+    }
+    const canvas = { getContext: () => context, toDataURL: () => 'image', points }
+    layers.push(canvas)
+    return canvas
+  } }
+  try {
+    const path = Array.from({ length: 120 }, (_, x) => ({ x, y: Math.round(30 + 0.37 * x) }))
+    renderReconstruction(
+      { width: 140, height: 100, region: { x: 0, y: 0, width: 139, height: 99 }, horizontal: [], vertical: [], curves: [path] },
+      [], { curve: '#0066ff', grid: '#000000', axis: '#000000' }, { curve: 1, grid: 1 },
+    )
+    const result = layers[2].points
+    const roughness = (points) => points.slice(4, -4).reduce((sum, point, offset) => {
+      const index = offset + 4
+      return sum + (points[index + 1].y - 2 * point.y + points[index - 1].y) ** 2
+    }, 0)
+    const old = path.map((point, index) => index === 0 || index === path.length - 1 ? point : {
+      x: (path[index - 1].x + 2 * point.x + path[index + 1].x) / 4,
+      y: (path[index - 1].y + 2 * point.y + path[index + 1].y) / 4,
+    })
+    const rms = Math.sqrt(result.slice(4, -4).reduce((sum, point) => sum + (point.y - (30 + 0.37 * point.x)) ** 2, 0) / (result.length - 8))
+    assert.ok(roughness(result) < roughness(old) * 0.2)
+    assert.ok(rms < 0.08)
+    assert.ok(result.every((point, index) => Math.hypot(point.x - path[index].x, point.y - path[index].y) <= 0.5 + 1e-9))
+    assert.deepEqual(result[0], path[0])
+    assert.deepEqual(result.at(-1), path.at(-1))
+  } finally {
+    if (previous === undefined) delete globalThis.document
+    else globalThis.document = previous
+  }
+})
+
+test('keeps estimated bridges and short paths unchanged when rendering', () => {
+  const previous = globalThis.document
+  const strokes = []
+  globalThis.document = { createElement: () => {
+    let points = []
+    const context = {
+      fillRect() {}, save() {}, restore() {}, rect() {}, clip() {}, drawImage() {},
+      beginPath() { points = [] }, moveTo(x, y) { points.push({ x, y }) }, lineTo(x, y) { points.push({ x, y }) },
+      stroke() { strokes.push(points) },
+    }
+    return { getContext: () => context, toDataURL: () => 'image' }
+  } }
+  try {
+    const bridge = [{ x: 1, y: 1 }, { x: 1.5, y: 1.3 }, { x: 2, y: 1.8 }, { x: 2.5, y: 2.4 }, { x: 3, y: 3 }]
+    const short = [{ x: 8, y: 8 }, { x: 9, y: 8 }, { x: 10, y: 9 }]
+    const integerBridge = [{ x: 15, y: 15 }, { x: 16, y: 15 }, { x: 17, y: 16 }, { x: 18, y: 16 }, { x: 19, y: 17 }]
+    renderReconstruction(
+      { width: 30, height: 30, region: { x: 0, y: 0, width: 29, height: 29 }, horizontal: [], vertical: [], curves: [bridge, short, integerBridge], estimatedCurves: [0, 2] },
+      [], { curve: '#0066ff', grid: '#000000', axis: '#000000' }, { curve: 1, grid: 1 },
+    )
+    assert.deepEqual(strokes, [bridge, short, integerBridge])
   } finally {
     if (previous === undefined) delete globalThis.document
     else globalThis.document = previous

@@ -32,8 +32,108 @@
 .datasets-section { order: 1; }
 .panel-footer { order: 2; }
 
+.workflow-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 10px 20px;
+  background: #101715;
+  border-bottom: 1px solid #293630;
+  flex: none;
+}
+
+.workflow-tab {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  max-width: 260px;
+  padding: 8px 12px;
+  text-align: left;
+  border: 1px solid #303d37;
+  border-radius: 9px;
+  background: #1a2320;
+  color: #cbd9d1;
+  cursor: pointer;
+}
+.workflow-tab.current { border-color: #51d6b3; background: #19382f; color: #f0fff9; }
+.workflow-tab.locked { opacity: .48; }
+.workflow-tab:disabled { cursor: default; }
+.workflow-tab.complete:hover { border-color: #74d8b8; background: #223b32; }
+.workflow-tab:focus-visible { outline: 2px solid #87f4d0; outline-offset: 2px; }
+.workflow-number {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  background: #293d35;
+  color: #83e7c8;
+  font: 600 11px var(--mono);
+}
+.workflow-tab.current .workflow-number { background: #52d7b4; color: #10251c; }
+.workflow-label { display: grid; gap: 2px; min-width: 0; }
+.workflow-label strong { font-size: 11px; }
+.workflow-label small { color: #a3b6aa; font-size: 10px; }
+
+.panel-section { border-bottom-color: #2b3731; }
+.grid-guide-controls { border-radius: 9px; background: #18221e; }
+.grid-guide-controls button { border-radius: 6px; }
+.heal-review { display: grid; gap: 6px; padding: 9px; border: 1px solid #9a6a2d; border-radius: 7px; background: #32271b; color: #ffd59b; }
+.heal-review .prep-actions { margin: 0; }
+.heal-review button[aria-pressed=true] { border-color: #ffba68; color: #ffcf91; }
+.grid-guide-controls button svg { flex: none; vertical-align: middle; }
+.mode-prep-heal { cursor: crosshair; }
+.canvas-context-menu {
+  z-index: 20;
+  min-width: 175px;
+  padding: 5px;
+  border: 1px solid #53675c;
+  border-radius: 7px;
+  background: #19221e;
+  box-shadow: 0 8px 24px #0009;
+}
+.canvas-context-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #e7ece9;
+  text-align: left;
+  cursor: pointer;
+}
+.canvas-context-menu button:hover:not(:disabled), .canvas-context-menu button:focus-visible { background: #30463c; }
+.canvas-context-menu button:disabled { opacity: .4; cursor: default; }
+
 .dataset-row { display: flex; align-items: center; }
-.dataset-row .dataset-select { min-width: 0; flex: 1; }
+.dataset-drag { display: grid; place-items: center; flex: none; width: 23px; height: 38px; padding: 0; border: 0; background: transparent; color: #84958b; cursor: grab; }
+.dataset-drag:active { cursor: grabbing; }
+.dataset-drag:focus-visible { outline: 2px solid #6cbca0; outline-offset: -2px; }
+.dataset-entry { position: relative; display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; height: 48px; padding: 0 9px; }
+.dataset-row .dataset-select { position: absolute; inset: 0; width: 100%; height: 100%; }
+.dataset-entry .dataset-meta, .dataset-entry .dataset-point-count { position: relative; pointer-events: none; }
+.dataset-entry .dataset-swatch { position: relative; width: 12px; height: 25px; cursor: pointer; }
+.dataset-entry .dataset-swatch input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.dataset-entry .dataset-swatch span { display: block; width: 8px; height: 25px; border: 1px solid #87928c; border-radius: 4px; pointer-events: none; }
+.dataset-entry .dataset-swatch:focus-within span { outline: 2px solid #bceadd; outline-offset: 2px; }
+.dataset-title { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.dataset-title .dataset-name { flex: 0 1 auto; min-width: 0; }
+.dataset-edit-name, .dataset-name-editor button { display: grid; place-items: center; flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: #a7b6ac; cursor: pointer; pointer-events: auto; }
+.dataset-edit-name:hover, .dataset-name-editor button:hover { color: #e7ece9; background: #394a40; }
+.dataset-name-editor { display: flex; align-items: center; gap: 3px; min-width: 0; width: 100%; pointer-events: auto; }
+.dataset-name-editor input { min-width: 0; width: 100%; height: 22px; padding: 0 5px; border: 1px solid #6cbca0; border-radius: 3px; background: #141917; color: #e7ece9; font-size: 10px; }
+.dataset-card.multi-selected { border-color: #6cbca0; }
+.dataset-card.multi-selected:not(.active) { background: #20342c; }
+.dataset-card.drop-before { box-shadow: 0 -3px #48d7bf; }
+.dataset-card.drop-after { box-shadow: 0 3px #48d7bf; }
+.dataset-selection-hint { margin: 8px 0; color: #a7b6ac; font-size: 10px; }
+.dataset-bulk-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.dataset-bulk-actions span { color: #a7b6ac; font-size: 9px; white-space: nowrap; }
+.dataset-bulk-actions button { padding: 4px 6px; border: 1px solid #547f6d; border-radius: 4px; background: #203c30; color: #c6efde; font-size: 10px; cursor: pointer; }
+.dataset-bulk-actions .bulk-delete { border-color: #6e4642; background: #3a2523; color: #ffc2b8; }
 .dataset-delete {
   display: flex;
   align-items: center;
@@ -103,6 +203,10 @@
 }
 
 @media (max-width: 900px) {
+  .workflow-tabs { padding: 6px 10px; gap: 5px; }
+  .workflow-tab { padding: 6px; gap: 6px; }
+  .workflow-label small { display: none; }
+  .workflow-label strong { font-size: 10px; }
   .workspace {
     grid-template-rows: minmax(0, 3fr) minmax(130px, 2fr);
   }

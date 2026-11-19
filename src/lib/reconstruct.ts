@@ -1,5 +1,6 @@
 import type { PixelPoint } from './digitizer'
 import type { GridGuides } from './image-processing'
+import { thinBinaryInk } from './skeleton.ts'
 
 export interface PlotRegion { x: number; y: number; width: number; height: number }
 export type CorrectionLayer = 'curve' | 'grid'
@@ -18,6 +19,7 @@ export interface Reconstruction {
   horizontal: number[]
   vertical: number[]
   curves: PixelPoint[][]
+  estimatedCurves?: number[]
   horizontalAxis?: number
   verticalAxis?: number
 }
@@ -128,28 +130,8 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     }
   }
 
+  thinBinaryInk(ink, w, h)
   const get = (x: number, y: number) => x < 0 || y < 0 || x >= w || y >= h ? 0 : ink[y * w + x]
-  const remove: number[] = []
-  for (let iteration = 0; iteration < 100; iteration++) {
-    let changed = false
-    for (let phase = 0; phase < 2; phase++) {
-      remove.length = 0
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        if (!get(x, y)) continue
-        const p = [get(x, y - 1), get(x + 1, y - 1), get(x + 1, y), get(x + 1, y + 1),
-          get(x, y + 1), get(x - 1, y + 1), get(x - 1, y), get(x - 1, y - 1)]
-        const count = p.reduce((sum, value) => sum + value, 0)
-        const transitions = p.reduce((sum, value, index) => sum + (value === 0 && p[(index + 1) % 8] === 1 ? 1 : 0), 0)
-        if (count < 2 || count > 6 || transitions !== 1) continue
-        const [north, , east, , south, , west] = p
-        if (phase === 0 ? north * east * south || east * south * west : north * east * west || north * south * west) continue
-        remove.push(y * w + x)
-      }
-      if (remove.length) changed = true
-      for (const index of remove) ink[index] = 0
-    }
-    if (!changed) break
-  }
 
   const directions = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]]
   const neighbors = (index: number) => {
@@ -228,6 +210,7 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     }
   }
   const used = new Set<number>()
+  const estimatedCurves: number[] = []
   const bridgeLines = (mask: Uint8Array, origin: number, horizontalLine: boolean) => {
     for (let start = 0; start < mask.length;) {
       if (!mask[start]) { start++; continue }
@@ -271,6 +254,7 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
           if (candidates.some((other) => other !== candidate && !used.has(other.a) && !used.has(other.b)
             && (other.a === candidate.a || other.b === candidate.b || other.a === candidate.b || other.b === candidate.a) && other.score < candidate.score + 1)) continue
           const first = endpoints[candidate.a].point; const second = endpoints[candidate.b].point
+          estimatedCurves.push(curves.length)
           if (touchingSide === null) curves.push([first, second])
           else {
             const grid = origin + (touchingSide < 0 ? start : end)
@@ -296,7 +280,7 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   }
   bridgeLines(vMask, left, false)
   bridgeLines(hMask, top, true)
-  return { width, height, region: { x: left, y: top, width: right - left, height: bottom - top }, horizontal, vertical, curves,
+  return { width, height, region: { x: left, y: top, width: right - left, height: bottom - top }, horizontal, vertical, curves, estimatedCurves,
     horizontalAxis: options.axisGuides.horizontal ?? horizontal[horizontal.length - 1], verticalAxis: options.axisGuides.vertical ?? vertical[0] }
 }
 
@@ -309,6 +293,26 @@ export function reconstructionDimensions(width: number, height: number, setting:
   const result = { width: Math.ceil(width * factor), height: Math.ceil(height * factor) }
   if (result.width * result.height > 16_000_000) throw new Error('Upscaled image exceeds 16 megapixels. Choose a smaller size.')
   return result
+}
+
+function smoothPixelPath(path: PixelPoint[]): PixelPoint[] {
+  if (path.length < 4 || path.some((point, index) =>
+    !Number.isInteger(point.x) || !Number.isInteger(point.y)
+    || (index > 0 && Math.hypot(point.x - path[index - 1].x, point.y - path[index - 1].y) > Math.SQRT2 + 1e-6))) return path
+  const weights = [1, 8, 28, 56, 70, 56, 28, 8, 1]
+  return path.map((point, index) => {
+    if (index === 0 || index === path.length - 1) return point
+    let x = 0, y = 0
+    for (let offset = -4; offset <= 4; offset++) {
+      const neighbor = path[Math.max(0, Math.min(path.length - 1, index + offset))]
+      const weight = weights[offset + 4] / 256
+      x += neighbor.x * weight; y += neighbor.y * weight
+    }
+    const dx = x - point.x, dy = y - point.y
+    const distance = Math.hypot(dx, dy)
+    const factor = distance > 0.5 ? 0.5 / distance : 1
+    return { x: point.x + dx * factor, y: point.y + dy * factor }
+  })
 }
 
 function renderReconstructionLayers(geometry: Reconstruction, corrections: Correction[], colors: ReconstructionColors, widths: ReconstructionWidths, output = { width: geometry.width, height: geometry.height }) {
@@ -333,16 +337,11 @@ function renderReconstructionLayers(geometry: Reconstruction, corrections: Corre
   for (const x of geometry.vertical) { gridContext.strokeStyle = x === (geometry.verticalAxis ?? geometry.vertical[0]) ? colors.axis : colors.grid; gridContext.beginPath(); gridContext.moveTo(x, r.y); gridContext.lineTo(x, r.y + r.height); gridContext.stroke() }
   curveContext.strokeStyle = colors.curve
   curveContext.lineWidth = widths.curve
-  for (const path of geometry.curves) {
-    const smooth = path.length >= 4 && path.slice(1).every((point, index) => Math.hypot(point.x - path[index].x, point.y - path[index].y) <= Math.SQRT2 + 1e-6)
-    curveContext.beginPath(); curveContext.moveTo(path[0].x, path[0].y)
-    for (let index = 1; index < path.length; index++) {
-      const point = path[index]
-      if (smooth && index < path.length - 1) {
-        const previous = path[index - 1], next = path[index + 1]
-        curveContext.lineTo((previous.x + 2 * point.x + next.x) / 4, (previous.y + 2 * point.y + next.y) / 4)
-      } else curveContext.lineTo(point.x, point.y)
-    }
+  const estimatedCurves = new Set(geometry.estimatedCurves)
+  for (const [index, path] of geometry.curves.entries()) {
+    const points = estimatedCurves.has(index) ? path : smoothPixelPath(path)
+    curveContext.beginPath(); curveContext.moveTo(points[0].x, points[0].y)
+    for (const point of points.slice(1)) curveContext.lineTo(point.x, point.y)
     curveContext.stroke()
   }
   for (const correction of corrections) {

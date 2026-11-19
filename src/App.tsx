@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, Axis3D, Check, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
-  FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, ImagePlus, Layers, LineChart,
-  MousePointer2, MoveUpRight, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
+  Eye, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
+  MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
   Target, Trash2, Upload,
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
@@ -14,6 +14,12 @@ import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
 import { calibrateFromIntersections, downloadFile, pointToData, traceColor } from './lib/digitizer'
 import { createBrushMask, extractBrushCurves } from './lib/painted-region'
+import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
+import { mergeDatasets } from './lib/dataset-merge'
+import { reorderDatasets } from './lib/dataset-order'
+import { drawDatasets } from './lib/dataset-render'
+import { rotationGeometry } from './lib/deskew'
+import { createWorkbook } from './lib/excel-export'
 import type { BrushMark } from './lib/painted-region'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
 
@@ -22,7 +28,7 @@ type WorkflowStep = 'image' | 'calibration' | 'digitize'
 type CompressorAxisVariable = 'flow' | 'head' | 'outletPressure' | 'pressureRatio' | 'efficiency' | 'speed' | 'igv' | 'custom'
 type CompressorAxisConfig = { variable: CompressorAxisVariable; label: string; unit: string }
 type CompressorAxes = { x: CompressorAxisConfig; y: CompressorAxisConfig }
-const palette = ['#48d7bf', '#f4a261', '#b9a7ff', '#e87878', '#73b7ed', '#e7ca76', '#ef8bcb']
+const palette = ['#006d64', '#a34500', '#5845b0', '#b42735', '#005f99', '#795600', '#a02179']
 const plotOptions: { id: PlotType; label: string; icon: typeof LineChart }[] = [
   { id: 'xy', label: 'X-Y Plot', icon: LineChart }, { id: 'bar', label: 'Bar Chart', icon: Activity },
   { id: 'polar', label: 'Polar', icon: Target }, { id: 'ternary', label: 'Ternary', icon: Axis3D },
@@ -72,7 +78,7 @@ const modeLabels: Record<ToolMode, string> = {
   surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance',
   'trace-region': 'Paint curve region',
   'grid-horizontal': 'Guide horizontal grid', 'grid-vertical': 'Guide vertical grid', 'guide-axis-x': 'Set X axis', 'guide-axis-y': 'Set Y axis', crop: 'Crop image',
-  'prep-region': 'Select plot area', 'prep-draw': 'Draw', 'prep-line': 'Draw straight line', 'prep-erase': 'Erase marks',
+  'prep-region': 'Select plot area', 'prep-draw': 'Draw', 'prep-line': 'Draw straight line', 'prep-erase': 'Erase', 'prep-heal': 'Heal curve gap',
 }
 
 export default function App() {
@@ -98,6 +104,12 @@ export default function App() {
   const [correctionLayer, setCorrectionLayer] = useState<CorrectionLayer>('curve')
   const [eraserWidth, setEraserWidth] = useState(ERASER_WIDTH)
   const [drawWidth, setDrawWidth] = useState(1)
+  const [snapDrawing, setSnapDrawing] = useState(false)
+  const [healBrushWidth, setHealBrushWidth] = useState(24)
+  const [healMark, setHealMark] = useState<BrushMark | null>(null)
+  const [healOptions, setHealOptions] = useState<PixelPoint[][]>([])
+  const [healChoice, setHealChoice] = useState(0)
+  const healPreview = healOptions[healChoice] ?? null
   const [reconstructionColors, setReconstructionColors] = useState<ReconstructionColors>({ curve: '#0066ff', grid: '#000000', axis: '#000000' })
   const [reconstructionWidths, setReconstructionWidths] = useState<ReconstructionWidths>({ curve: 1, grid: 1 })
   const [needsProcess, setNeedsProcess] = useState(true)
@@ -106,6 +118,10 @@ export default function App() {
   const [plotType, setPlotType] = useState<PlotType>('xy')
   const [datasets, setDatasets] = useState<Dataset[]>([defaultDataset(1)])
   const [activeId, setActiveId] = useState(datasets[0].id)
+  const [selectedDatasetIds, setSelectedDatasetIds] = useState<string[]>([datasets[0].id])
+  const [editingDatasetName, setEditingDatasetName] = useState<{ id: string; value: string } | null>(null)
+  const [datasetDropTarget, setDatasetDropTarget] = useState<{ id: string; after: boolean } | null>(null)
+  const [pointSelectionVersion, setPointSelectionVersion] = useState(0)
   const [mode, setMode] = useState<ToolMode>('select')
   const [xAxis, setXAxis] = useState<AxisCalibration>(blankAxis())
   const [yAxis, setYAxis] = useState<AxisCalibration>(blankAxis())
@@ -135,8 +151,11 @@ export default function App() {
   const projectInput = useRef<HTMLInputElement>(null)
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
   const processingRun = useRef(0)
+  const draggedDatasetId = useRef<string | null>(null)
+  const activateDataset = (id: string) => { setActiveId(id); setSelectedDatasetIds(id ? [id] : []); setEditingDatasetName(null) }
 
   useEffect(() => { setBrushMarks([]) }, [imageUrl, sourceImageUrl])
+  useEffect(() => { setHealMark(null); setHealOptions([]); setHealChoice(0) }, [mode, reconstruction, corrections, correctionLayer])
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -176,7 +195,7 @@ export default function App() {
     setPlotRegion(null); setAxisGuides({ horizontal: null, vertical: null }); setRegularGrid(true); setReconstruction(null); setCorrections([]); setNeedsProcess(true)
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
     const initialDataset = defaultDataset(1)
-    setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); setActiveId(initialDataset.id)
+    setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([initialDataset]); activateDataset(initialDataset.id)
     setCompressorAxes(defaultCompressorAxes)
     setFourPointPixels([])
     setWorkflowStep('image'); setCalibrationConfirmed(false); setBrushErasing(false)
@@ -233,15 +252,32 @@ export default function App() {
   }
 
   const updateCorrections = (next: Correction[]) => {
-    if (!reconstruction || preprocessing || needsProcess) { showNotice('Process the image before editing the reconstruction.', 'error'); return }
+    if (!reconstruction || preprocessing || needsProcess) { showNotice('Process the image before editing the reconstruction.', 'error'); return false }
     try {
       const result = renderReconstruction(reconstruction, next, reconstructionColors, reconstructionWidths)
       const preview = renderUpscaled(reconstruction, next, reconstructionColors, reconstructionWidths, upscale, result)
       setCorrections(next); setImageUrl(result); setProcessedImageUrl(result)
       setProcessedPreviewUrl(preview)
+      return true
     } catch (error) {
       showNotice(error instanceof Error ? error.message : 'Could not update the reconstruction.', 'error')
+      return false
     }
+  }
+
+  const applyHealing = () => {
+    if (healPreview && updateCorrections([...corrections, { points: healPreview, erase: false, layer: 'curve', width: drawWidth }])) {
+      setHealMark(null); setHealOptions([]); setShowOriginalPreview(false)
+      showNotice('Connection applied. Inspect it against the original; use Undo edit if needed.')
+    }
+  }
+
+  const curveLayerPixels = () => {
+    if (!reconstruction || needsProcess || preprocessing) throw new Error('Process the image before editing the curve.')
+    const canvas = renderReconstructionCurveLayer(reconstruction, corrections, reconstructionWidths)
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) throw new Error('This browser cannot read the curve layer.')
+    return context.getImageData(0, 0, canvas.width, canvas.height)
   }
 
   const updateReconstructionAppearance = (colors: ReconstructionColors, widths: ReconstructionWidths) => {
@@ -367,8 +403,64 @@ export default function App() {
     const selectedKind = kind ?? (plotType === 'compressor' ? 'speed' : 'curve')
     const next = defaultDataset(datasets.length + 1, selectedKind)
     setDatasets((current) => [...current, next])
-    setActiveId(next.id)
+    activateDataset(next.id)
     setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : selectedKind === 'efficiency' ? 'trace-region' : 'point')
+  }
+
+  const selectDataset = (dataset: Dataset, additive: boolean) => {
+    setEditingDatasetName(null)
+    if (additive && !pendingTrace) {
+      const selected = selectedDatasetIds.includes(dataset.id)
+      if (selected && selectedDatasetIds.length === 1) return
+      const next = selected ? selectedDatasetIds.filter((id) => id !== dataset.id) : [...selectedDatasetIds, dataset.id]
+      setSelectedDatasetIds(next)
+      if (!selected || activeId === dataset.id) setActiveId(selected ? next[next.length - 1] : dataset.id)
+      return
+    }
+    activateDataset(dataset.id)
+    if (!pendingTrace && mode !== 'point-edit') setMode(dataset.kind === 'surge' ? 'surge' : dataset.kind === 'choke' ? 'choke' : dataset.kind === 'speed' ? 'speed' : dataset.kind === 'efficiency' && plotType === 'compressor' ? 'trace-region' : 'point')
+  }
+
+  const mergeSelectedDatasets = () => {
+    if (pendingTrace) return
+    try {
+      const selected = datasets.filter((dataset) => selectedDatasetIds.includes(dataset.id))
+      const merged = mergeDatasets(selected, activeId)
+      if (!window.confirm(`Merge ${selected.length} datasets into "${merged.name}"? The selected datasets will be replaced. Check the resulting connections afterwards.`)) return
+      setDatasets((current) => current.flatMap((dataset) => dataset.id === merged.id ? [merged] : selectedDatasetIds.includes(dataset.id) ? [] : [dataset]))
+      activateDataset(merged.id)
+      setPointSelectionVersion((version) => version + 1)
+      setMode('point-edit')
+      showNotice(`Merged ${selected.length} datasets into ${merged.name}. Check the joined points.`)
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Could not merge the selected datasets.', 'error')
+    }
+  }
+
+  const deleteSelectedDatasets = () => {
+    if (pendingTrace || selectedDatasetIds.length < 2) return
+    const remaining = datasets.filter((dataset) => !selectedDatasetIds.includes(dataset.id))
+    const message = remaining.length
+      ? `Delete ${selectedDatasetIds.length} selected datasets and all their points?`
+      : `Delete all ${selectedDatasetIds.length} selected datasets and their points? A new empty dataset will be created.`
+    if (!window.confirm(message)) return
+    const next = remaining.length ? remaining : [defaultDataset(1, plotType === 'compressor' ? 'speed' : 'curve')]
+    setDatasets(next)
+    activateDataset(next[0].id)
+    setPointSelectionVersion((version) => version + 1)
+    showNotice(`Deleted ${selectedDatasetIds.length} datasets.`)
+  }
+
+  const moveDataset = (id: string, direction: -1 | 1) => {
+    const index = datasets.findIndex((dataset) => dataset.id === id)
+    const target = datasets[index + direction]
+    if (target) setDatasets((current) => reorderDatasets(current, id, target.id, direction > 0))
+  }
+
+  const saveDatasetName = () => {
+    if (!editingDatasetName) return
+    updateDataset(editingDatasetName.id, (dataset) => ({ ...dataset, name: editingDatasetName.value }))
+    setEditingDatasetName(null)
   }
 
   const traceCurve = async (seed: PixelPoint, guide?: PixelPoint[], reviewCandidate = false) => {
@@ -423,9 +515,9 @@ export default function App() {
           ? activeDataset.kind
           : 'curve'
       if (reviewCandidate && activeDataset) {
-        const next = { ...activeDataset, id: crypto.randomUUID(), name: `${activeDataset.name} (retrace candidate)`, color: palette.find((color) => color !== activeDataset.color) ?? '#48d7bf', points: traced }
+        const next = { ...activeDataset, id: crypto.randomUUID(), name: `${activeDataset.name} (retrace candidate)`, color: palette.find((color) => color !== activeDataset.color) ?? palette[0], points: traced }
         setDatasets((current) => [...current, next])
-        setActiveId(next.id)
+        activateDataset(next.id)
       } else if (plotType === 'compressor' && activeDataset?.kind === targetKind && (targetKind === 'speed' || targetKind === 'efficiency')) {
         updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: traced }))
       } else {
@@ -437,7 +529,7 @@ export default function App() {
             : `Trace ${datasets.filter((dataset) => dataset.kind === 'curve').length + 1}`
         next.points = traced
         setDatasets((current) => [...current, next])
-        setActiveId(next.id)
+        activateDataset(next.id)
       }
       setMode('point-edit')
       showNotice(reviewCandidate
@@ -451,14 +543,50 @@ export default function App() {
   }
 
   const tracePaintedRegion = (guide: PixelPoint[]) => {
-    if (!guide.length || (guide.length < 2 && mode !== 'prep-erase' && mode !== 'trace-region')) return
+    if (!guide.length || (guide.length < 2 && mode !== 'prep-erase' && mode !== 'trace-region' && mode !== 'prep-heal')) return
+    if (mode === 'prep-heal') {
+      try {
+        if (!reconstruction || needsProcess || preprocessing) throw new Error('Process the image before healing a curve.')
+        const margin = 110 + healBrushWidth / 2
+        const bounds = guide.reduce((area, p) => ({ left: Math.min(area.left, p.x), top: Math.min(area.top, p.y), right: Math.max(area.right, p.x), bottom: Math.max(area.bottom, p.y) }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity })
+        const left = Math.max(0, Math.floor(bounds.left - margin))
+        const top = Math.max(0, Math.floor(bounds.top - margin))
+        const right = Math.min(reconstruction.width, Math.ceil(bounds.right + margin))
+        const bottom = Math.min(reconstruction.height, Math.ceil(bounds.bottom + margin))
+        const width = right - left, height = bottom - top
+        if (width * height > 1_000_000) throw new Error('Brush a smaller area around one gap.')
+        const canvas = renderReconstructionCurveLayer(reconstruction, corrections, reconstructionWidths)
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('This browser cannot read the curve layer.')
+        const mark: BrushMark = { points: guide.map((p) => ({ x: p.x - left, y: p.y - top })), width: healBrushWidth, erase: false }
+        const selection = createBrushMask(width, height, [mark]).getContext('2d', { willReadFrequently: true })
+        const nearby = createBrushMask(width, height, [{ ...mark, width: mark.width + 200 }]).getContext('2d', { willReadFrequently: true })
+        if (!selection || !nearby) throw new Error('This browser cannot read the healing brush.')
+        const options = proposeBrushedHealing(context.getImageData(left, top, width, height), selection.getImageData(0, 0, width, height).data, nearby.getImageData(0, 0, width, height).data)
+        setHealMark({ points: guide, width: healBrushWidth, erase: false })
+        setHealOptions(options.map((path) => path.map((p) => ({ x: p.x + left, y: p.y + top }))))
+        setHealChoice(0)
+      } catch (error) {
+        setHealMark(null); setHealOptions([])
+        showNotice(error instanceof Error ? error.message : 'Could not propose a connection.', 'error')
+      }
+      return
+    }
     if (mode === 'prep-draw' || mode === 'prep-line' || mode === 'prep-erase') {
       const bounds = reconstruction?.region
       if (bounds && !guide.some((point) => point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height)) {
         showNotice('Draw inside the detected plot area. Select a different area and process again if needed.', 'error')
         return
       }
-      updateCorrections([...corrections, { points: mode === 'prep-line' ? [guide[0], guide[guide.length - 1]] : guide, erase: mode === 'prep-erase', layer: correctionLayer, width: mode === 'prep-erase' ? eraserWidth : drawWidth }])
+      let points = mode === 'prep-line' ? [guide[0], guide[guide.length - 1]] : [...guide]
+      if (mode !== 'prep-erase' && correctionLayer === 'curve' && snapDrawing) {
+        try {
+          const pixels = curveLayerPixels()
+          points[0] = snapToCurve(pixels, points[0]) ?? points[0]
+          points[points.length - 1] = snapToCurve(pixels, points[points.length - 1]) ?? points[points.length - 1]
+        } catch (error) { showNotice(error instanceof Error ? error.message : 'Could not snap the stroke.', 'error'); return }
+      }
+      updateCorrections([...corrections, { points, erase: mode === 'prep-erase', layer: correctionLayer, width: mode === 'prep-erase' ? eraserWidth : drawWidth }])
       return
     }
     if (mode === 'trace-region') setBrushMarks((current) => [...current, { points: guide, width: traceBrushWidth, erase: brushErasing }])
@@ -524,7 +652,7 @@ export default function App() {
       })
       setDatasets((current) => [...current, ...next])
       setPendingTrace({ ids: next.map((dataset) => dataset.id), previousActiveId: activeId, warnings: [...extraction.warnings, ...(!showOriginalPreview && processedImageUrl && !isolatedCurveLayer ? ['Using the composite image; process it again to separate the curve layer from the grid.'] : []), ...(excluded ? [`${excluded} speed curve candidates were removed by the boundaries.`] : [])] })
-      setActiveId(next[0].id)
+      activateDataset(next[0].id)
       setMode('select')
       showNotice(`Created ${next.length} curve${next.length === 1 ? '' : 's'}.${excluded ? ` ${excluded} removed by boundaries.` : ''} Review before confirming.`)
     } catch (error) {
@@ -663,13 +791,18 @@ export default function App() {
       const bestPoint = activeDataset.points[best]
       return Math.hypot(candidate.x - point.x, candidate.y - point.y) < Math.hypot(bestPoint.x - point.x, bestPoint.y - point.y) ? current : best
     }, 0)
-    if (Math.hypot(activeDataset.points[index].x - point.x, activeDataset.points[index].y - point.y) < 24) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) }))
+    if (Math.hypot(activeDataset.points[index].x - point.x, activeDataset.points[index].y - point.y) < 24) {
+      updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) }))
+      setPointSelectionVersion((version) => version + 1)
+    }
   }
 
   const deleteDataset = (id: string) => {
     if (pendingTrace && !pendingTrace.ids.includes(id)) return
+    setEditingDatasetName(null)
     if (datasets.length === 1) {
       updateDataset(id, (dataset) => ({ ...dataset, points: [] }))
+      setPointSelectionVersion((version) => version + 1)
       return
     }
     const remaining = datasets.filter((dataset) => dataset.id !== id)
@@ -677,14 +810,15 @@ export default function App() {
     if (pendingTrace) {
       const ids = pendingTrace.ids.filter((item) => item !== id)
       if (!ids.length) {
-        setActiveId(pendingTrace.previousActiveId)
+        activateDataset(pendingTrace.previousActiveId)
         setPendingTrace(null)
         setMode('trace-region')
       } else {
         setPendingTrace({ ...pendingTrace, ids })
-        if (activeId === id) setActiveId(ids[0])
+        if (activeId === id) activateDataset(ids[0])
       }
-    } else if (activeId === id) setActiveId(remaining[0].id)
+    } else if (activeId === id) activateDataset(remaining[0].id)
+    else setSelectedDatasetIds((current) => current.filter((item) => item !== id))
   }
 
   const cropImage = async (rect: { x: number; y: number; width: number; height: number }) => {
@@ -736,6 +870,37 @@ export default function App() {
     setImageUrl(updated); setSourceImageUrl(updated); setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
     setPlotRegion(null); setAxisGuides({ horizontal: null, vertical: null }); setReconstruction(null); setCorrections([]); setNeedsProcess(true); setImagePrepared(false); setWorkflowStep('image'); setCalibrationConfirmed(false); setMode('select')
     showNotice('Image transformed. Process it again before continuing.')
+  }
+
+  const applyDeskew = async (degrees: number) => {
+    if (!sourceImageUrl || preprocessing || !Number.isFinite(degrees) || Math.abs(degrees) > 15 || degrees === 0) return
+    if ((processedImageUrl || xAxis.points.length || yAxis.points.length) && !window.confirm('Deskewing clears the reconstruction, edits and calibration. Existing dataset points will be rotated; process the image and calibrate again. Continue?')) return
+    const run = ++processingRun.current
+    setPreprocessing(true)
+    try {
+      const image = new Image(); image.src = sourceImageUrl; await image.decode()
+      if (run !== processingRun.current) return
+      const geometry = rotationGeometry(image.naturalWidth, image.naturalHeight, degrees)
+      const canvas = document.createElement('canvas'); canvas.width = geometry.width; canvas.height = geometry.height
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('This browser cannot rotate the image.')
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
+      context.translate(canvas.width / 2, canvas.height / 2); context.rotate(geometry.radians)
+      context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2)
+      const rotated = canvas.toDataURL('image/png')
+      setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.map(geometry.transformPoint) })))
+      setXAxis(blankAxis()); setYAxis(blankAxis()); setFourPointPixels([])
+      setImageUrl(rotated); setSourceImageUrl(rotated); setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false)
+      setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] }); setPlotRegion(null)
+      setAxisGuides({ horizontal: null, vertical: null }); setReconstruction(null); setCorrections([])
+      setNeedsProcess(true); setImagePrepared(false); setWorkflowStep('image'); setCalibrationConfirmed(false); setMode('select')
+      setPointSelectionVersion((version) => version + 1)
+      showNotice('Deskew applied. Process the image and calibrate again before exporting values.')
+    } catch (error) {
+      if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Could not deskew the image.', 'error')
+    } finally {
+      if (run === processingRun.current) setPreprocessing(false)
+    }
   }
 
   const getExportPoints = (dataset: Dataset) => dataset.points
@@ -804,6 +969,29 @@ export default function App() {
     downloadFile(`${imageName || 'plot'}-data.json`, JSON.stringify(project, null, 2), 'application/json')
   }
 
+  const exportExcel = async () => {
+    if (!sourceImageUrl || pendingTrace) return
+    try {
+      const image = new Image(); image.src = sourceImageUrl; await image.decode()
+      const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('This browser cannot draw the plot for Excel.')
+      context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
+      context.drawImage(image, 0, 0)
+      drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100)
+      const xLabel = calibrated ? plotType === 'compressor' ? axisName(compressorAxes.x) : 'X' : 'Pixel X'
+      const yLabel = calibrated ? plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y' : 'Pixel Y'
+      const workbook = await createWorkbook(datasets.map((dataset) => ({ dataset, points: getExportPoints(dataset) })), xLabel, yLabel, {
+        base64: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height,
+      })
+      const buffer = await workbook.xlsx.writeBuffer()
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      downloadFile(`${imageName || 'plot'}-data.xlsx`, blob)
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Could not export the Excel workbook.', 'error')
+    }
+  }
+
 
   const exportProject = async () => {
     const portable = async (url: string | null) => {
@@ -869,7 +1057,7 @@ export default function App() {
       const confirmed = hasCalibration && (project.calibrationConfirmed ?? true)
       const step: WorkflowStep = !prepared ? 'image' : project.workflowStep === 'image' ? 'image' : confirmed && project.workflowStep !== 'calibration' ? 'digitize' : 'calibration'
       setCalibrationConfirmed(confirmed); setWorkflowStep(step); setBrushErasing(false)
-      setActiveId(project.datasets[0]?.id ?? ''); setMode(step === 'digitize' ? 'point' : 'select'); showNotice('Project opened. Process the image again before editing its reconstruction.')
+      activateDataset(project.datasets[0]?.id ?? ''); setPointSelectionVersion((version) => version + 1); setMode(step === 'digitize' ? 'point' : 'select'); showNotice('Project opened. Process the image again before editing its reconstruction.')
     } catch { showNotice('That project file is invalid or unsupported.', 'error') }
   }
 
@@ -889,18 +1077,43 @@ export default function App() {
       })()
     : null
   const pressPointTool = () => setMode('point')
+  const toggleCompare = () => {
+    if (!processedImageUrl || !sourceImageUrl) return
+    setShowBackground(true)
+    if (workflowStep === 'image' && !showOriginalPreview && mode !== 'prep-heal') setMode('select')
+    setShowOriginalPreview((current) => !current)
+  }
+  const steps: { id: WorkflowStep; label: string; caption: string }[] = [
+    { id: 'image', label: 'Process image', caption: 'Prepare & repair' },
+    { id: 'calibration', label: 'Calibrate axes', caption: 'Set reference values' },
+    { id: 'digitize', label: 'Extract points', caption: 'Review & export' },
+  ]
+  const currentStepIndex = steps.findIndex((step) => step.id === workflowStep)
+  const returnToStep = (step: WorkflowStep) => {
+    const target = steps.findIndex((item) => item.id === step)
+    if (target >= currentStepIndex || pendingTrace || loading || preprocessing || gridDetecting) return
+    if (step === 'image') setImagePrepared(false)
+    setCalibrationConfirmed(false)
+    setWorkflowStep(step)
+    setMode(step === 'calibration' ? 'calibrate-edit' : 'select')
+    setActivePanel('data')
+  }
 
   return (
     <main className="app-frame">
       <header className="topbar">
         <a className="brand" href="#" aria-label="Plotline home"><span className="brand-mark"><span /><span /><span /></span><span>plotline</span><span className="brand-divider" /><span className="brand-subtitle">DIGITIZER</span></a>
         <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={imageName} onChange={(event) => setImageName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
-        <div className="top-actions"><button className="top-quiet" disabled={Boolean(pendingTrace)} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
+        <div className="top-actions"><button className="top-quiet" disabled={Boolean(pendingTrace)} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={!sourceImageUrl || Boolean(pendingTrace)}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
       </header>
 
       <div className="type-ribbon" inert={Boolean(pendingTrace)}><span className="ribbon-label">PLOT TYPE</span><div className="plot-tabs" role="tablist" aria-label="Plot type">
         {plotOptions.map(({ id, label, icon: Icon }) => <button key={id} role="tab" aria-selected={plotType === id} className={plotType === id ? 'plot-tab active' : 'plot-tab'} onClick={() => { setPlotType(id); setMode(workflowStep === 'digitize' ? (id === 'compressor' ? 'surge' : 'point') : 'select') }}><Icon size={15} /><span>{label}</span></button>)}
-      </div><span className="type-ribbon-spacer" /><button className="icon-action" aria-label="Help" title="Click to add calibration or digitized points. Right-click near a point to remove it." onClick={() => showNotice('Set X/Y calibration, choose Add points, then click the chart. Right-click points to remove them.')}><CircleHelp size={17} /></button></div>
+      </div><span className="type-ribbon-spacer" /><button className="icon-action" aria-label="Help" title="Click to add calibration or digitized points. Right-click for canvas actions." onClick={() => showNotice('Set X/Y calibration, choose Add points, then click the chart. Right-click for canvas actions.')}><CircleHelp size={17} /></button></div>
+
+      <nav className="workflow-tabs" aria-label="Workflow steps">
+        {steps.map((step, index) => <button key={step.id} type="button" className={`workflow-tab ${index === currentStepIndex ? 'current' : index < currentStepIndex ? 'complete' : 'locked'}`} aria-current={index === currentStepIndex ? 'step' : undefined} disabled={index >= currentStepIndex || Boolean(pendingTrace) || loading || preprocessing || gridDetecting} onClick={() => returnToStep(step.id)} title={index > currentStepIndex ? 'Complete the current step first' : index < currentStepIndex ? 'Return and confirm following steps again' : 'Current step'}><span className="workflow-number">{index < currentStepIndex ? <Check size={14} /> : `0${index + 1}`}</span><span className="workflow-label"><strong>{step.label}</strong><small>{step.caption}</small></span></button>)}
+      </nav>
 
       <div className="workspace">
         <aside className="left-rail" inert={Boolean(pendingTrace)}>
@@ -912,14 +1125,14 @@ export default function App() {
             </>}
             {workflowStep === 'digitize' && <><div className="tool-group-label tool-gap">DIGITIZE</div>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
-            <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !activePoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
+            <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className="tool-button" onClick={retraceActiveDataset} disabled={!imagePrepared || loading || activePoints < 2}><span className="tool-icon"><ScanSearch size={16} /></span><span>Retrace edited curve</span></button>
             <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => { if (activeDataset?.kind !== 'measurement') addDataset('measurement'); setMode('measure') }} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
               <div className="tool-group-label tool-gap">COMPRESSOR MAP</div>
-              <button className={`tool-button ${mode === 'surge' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'surge'); if (target) setActiveId(target.id); else addDataset('surge'); setMode('surge') }}><span className="tool-icon boundary-icon">S</span><span>Surge boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
-              <button className={`tool-button ${mode === 'choke' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'choke'); if (target) setActiveId(target.id); else addDataset('choke'); setMode('choke') }}><span className="tool-icon boundary-icon choke-icon">C</span><span>Choke boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
+              <button className={`tool-button ${mode === 'surge' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'surge'); if (target) activateDataset(target.id); else addDataset('surge'); setMode('surge') }}><span className="tool-icon boundary-icon">S</span><span>Surge boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
+              <button className={`tool-button ${mode === 'choke' ? 'selected' : ''}`} onClick={() => { const target = datasets.find((dataset) => dataset.kind === 'choke'); if (target) activateDataset(target.id); else addDataset('choke'); setMode('choke') }}><span className="tool-icon boundary-icon choke-icon">C</span><span>Choke boundary</span><kbd>{datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? <Check size={13} /> : '—'}</kbd></button>
               <button className={`tool-button ${mode === 'speed' ? 'selected' : ''}`} onClick={() => addDataset('speed')}><span className="tool-icon"><Gauge size={16} /></span><span>New speed line</span><kbd>RPM</kbd></button>
               <button className={`tool-button ${activeDataset?.kind === 'efficiency' ? 'selected' : ''}`} onClick={() => addDataset('efficiency')}><span className="tool-icon"><Activity size={16} /></span><span>Efficiency contour</span></button>
             </>}
@@ -933,10 +1146,10 @@ export default function App() {
         </aside>
 
         <section className="center-workspace" aria-label="Plot workspace">
-          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right">{workflowStep !== 'image' && processedImageUrl && <button onClick={() => { setShowBackground(true); setShowOriginalPreview((current) => !current) }}>{showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button>}<button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo last point" onClick={() => activeDataset && updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) }))} disabled={Boolean(pendingTrace) || workflowStep !== 'digitize' || !activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
+          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right"><button onClick={toggleCompare} disabled={!processedImageUrl || !sourceImageUrl} aria-label={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} title={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} aria-pressed={showOriginalPreview}><Eye size={14} /> {showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button><button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo last point" onClick={() => { if (activeDataset) { updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) })); setPointSelectionVersion((version) => version + 1) } }} disabled={Boolean(pendingTrace) || workflowStep !== 'digitize' || !activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
-            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} displayImageUrl={!showOriginalPreview && processedImageUrl ? processedPreviewUrl : null} onImageError={() => showNotice('Could not load the plot image or upscaled preview.', 'error')} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Reconstructed plot' : 'Original image'} showBackground={showBackground} datasets={datasets} activeDatasetId={activeId} mode={mode} gridGuides={showGuides ? gridGuides : { horizontal: [], vertical: [] }} axisGuides={showGuides ? axisGuides : { horizontal: null, vertical: null }} plotRegion={showGuides ? plotRegion : null}
+            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} displayImageUrl={!showOriginalPreview && processedImageUrl ? processedPreviewUrl : null} onImageError={() => showNotice('Could not load the plot image or upscaled preview.', 'error')} onSaveError={(message) => showNotice(message, 'error')} imageName={imageName} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Reconstructed plot' : 'Original image'} showBackground={showBackground} datasets={datasets} activeDatasetId={activeId} selectionVersion={pointSelectionVersion} onSelectDataset={activateDataset} mode={mode} gridGuides={showGuides ? gridGuides : { horizontal: [], vertical: [] }} axisGuides={showGuides ? axisGuides : { horizontal: null, vertical: null }} plotRegion={showGuides ? plotRegion : null}
               calibrationMarkers={calibrationConfirmed && mode !== 'calibrate-edit' ? [] : [
                 ...xAxis.points.map((point, index) => ({ axis: 'x' as const, index, point, value: point.value, label: `X${index + 1}` })),
                 ...yAxis.points.map((point, index) => ({ axis: 'y' as const, index, point, value: point.value, label: `Y${index + 1}` })),
@@ -957,9 +1170,14 @@ export default function App() {
               curveColor={reconstructionColors.curve}
               correctionColor={reconstructionColors[correctionLayer]}
               correctionWidth={drawWidth}
+              healMark={healMark}
+              healBrushWidth={healBrushWidth}
+              healPreview={healPreview}
+              onApplyHealing={applyHealing}
+              onHealChoiceChange={setHealChoice}
               readOnly={Boolean(pendingTrace)}
-              onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint}
-              onDeleteSelectedPoint={(index) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) })) }}
+              onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} canDeletePoint={workflowStep === 'digitize'}
+              onDeleteSelectedPoint={(datasetId, index) => updateDataset(datasetId, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) }))}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
               onCropSelection={(rect) => { void cropImage(rect) }}
               onRegionSelection={(rect) => {
@@ -968,12 +1186,12 @@ export default function App() {
                 setPlotRegion(rect); setNeedsProcess(true); setImagePrepared(false); setMode('select')
                 showNotice('Plot area selected. Press Process image to rebuild it.')
               }}
-              onMovePoint={(index, point) => { if (activeDataset) updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) })) }}
+              onMovePoint={(datasetId, index, point) => updateDataset(datasetId, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) }))}
               onMoveCalibrationPoint={updateCalibrationPoint}
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves, then press Auto point.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves, then press Auto point.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && workflowStep === 'digitize' && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -997,19 +1215,25 @@ export default function App() {
         <aside className="right-panel">
           <div className="panel-tabs"><button className={activePanel === 'data' ? 'active' : ''} onClick={() => setActivePanel('data')}><Layers size={14} /> Data</button><button className={activePanel === 'settings' ? 'active' : ''} disabled={Boolean(pendingTrace)} onClick={() => setActivePanel('settings')}><Settings2 size={14} /> Settings</button></div>
           {activePanel === 'data' ? <div className="panel-content">
-            {workflowStep !== 'image' && <button className="workflow-back" disabled={Boolean(pendingTrace)} onClick={() => { if (workflowStep === 'digitize') { setWorkflowStep('calibration'); setCalibrationConfirmed(false); setMode('calibrate-edit') } else { setWorkflowStep('image'); setMode('select') } }}>← Back to {workflowStep === 'digitize' ? 'calibration' : 'image processing'}</button>}
-            {workflowStep === 'image' && <ImagePreparationPanel hasImage={Boolean(imageUrl)} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} needsProcess={needsProcess} hasRegion={Boolean(plotRegion)} correctionCount={corrections.length} correctionLayer={correctionLayer} eraserWidth={eraserWidth} drawWidth={drawWidth} upscale={upscale} customLongEdge={customLongEdge} widths={reconstructionWidths} widthsRequireProcess={!reconstruction || needsProcess} gridGuides={gridGuides} axisGuides={axisGuides} regularGrid={regularGrid} mode={mode}
+            {workflowStep === 'image' && <ImagePreparationPanel hasImage={Boolean(imageUrl)} sourceImageUrl={sourceImageUrl} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} needsProcess={needsProcess} hasRegion={Boolean(plotRegion)} correctionCount={corrections.length} correctionLayer={correctionLayer} eraserWidth={eraserWidth} drawWidth={drawWidth} snapDrawing={snapDrawing} healBrushWidth={healBrushWidth} healingPreview={Boolean(healPreview)} healChoice={healChoice} upscale={upscale} customLongEdge={customLongEdge} widths={reconstructionWidths} widthsRequireProcess={!reconstruction || needsProcess} gridGuides={gridGuides} axisGuides={axisGuides} regularGrid={regularGrid} mode={mode}
               onProcess={() => { void processImage() }}
+              onDeskew={(degrees) => { void applyDeskew(degrees) }}
               onSelectTool={(next) => {
                 if (preprocessing) return
-                if ((next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase') && (!reconstruction || needsProcess)) { showNotice('Process the image before editing the reconstruction.', 'error'); return }
+                if ((next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase' || next === 'prep-heal') && (!reconstruction || needsProcess)) { showNotice('Process the image before editing the reconstruction.', 'error'); return }
                 if (mode !== next && (next === 'grid-horizontal' || next === 'grid-vertical' || next === 'guide-axis-x' || next === 'guide-axis-y' || next === 'prep-region')) setShowOriginalPreview(true)
-                if (mode !== next && (next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase')) setShowOriginalPreview(false)
+                if (mode !== next && (next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase' || next === 'prep-heal')) setShowOriginalPreview(false)
+                if (next === 'prep-heal') setCorrectionLayer('curve')
                 setShowBackground(true); setMode(mode === next ? 'select' : next)
               }}
-              onCorrectionLayerChange={setCorrectionLayer}
+              onCorrectionLayerChange={(layer) => { setCorrectionLayer(layer); if (layer !== 'curve' && mode === 'prep-heal') setMode('select') }}
               onEraserWidthChange={setEraserWidth}
               onDrawWidthChange={setDrawWidth}
+              onSnapDrawingChange={setSnapDrawing}
+              onHealBrushWidthChange={setHealBrushWidth}
+              onHealChoiceChange={setHealChoice}
+              onApplyHealing={applyHealing}
+              onDiscardHealing={() => { setHealMark(null); setHealOptions([]) }}
               onUpscaleChange={updateUpscale}
               onCustomLongEdgeChange={setCustomLongEdge}
               onApplyCustomUpscale={() => {
@@ -1023,7 +1247,7 @@ export default function App() {
               onClearAxisGuides={() => { if (!preprocessing) { setAxisGuides({ horizontal: null, vertical: null }); setNeedsProcess(true); setImagePrepared(false); setMode('select') } }}
               onRegularGridChange={(enabled) => { if (!preprocessing) { setRegularGrid(enabled); setNeedsProcess(true); setImagePrepared(false) } }}
               onUndoCorrection={() => updateCorrections(corrections.slice(0, -1))}
-              onToggleCompare={() => { setShowBackground(true); if (!showOriginalPreview) setMode('select'); setShowOriginalPreview((current) => !current) }} onContinue={confirmPreparedImage} />}
+              onContinue={() => { if (healPreview) { showNotice('Apply or discard the proposed connection before continuing.', 'error'); return }; confirmPreparedImage() }} />}
             {imagePrepared && <>
             {workflowStep === 'calibration' && <><section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
               <p className="section-copy">Click two known ticks on each axis and enter their values.</p>
@@ -1086,14 +1310,28 @@ export default function App() {
             </section>}</>}
             {workflowStep === 'digitize' && <>
             {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Optional boundaries</strong><span>Add Surge/Choke to stop speed traces near their sampled points.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
-            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" disabled={Boolean(pendingTrace)} onClick={() => addDataset()} title="Add dataset">+</button></div>
+            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div>{!pendingTrace && selectedDatasetIds.length > 1 && <div className="dataset-bulk-actions"><span>{selectedDatasetIds.length} selected</span><button onClick={mergeSelectedDatasets} title="Merge selected datasets">Merge</button><button className="bulk-delete" onClick={deleteSelectedDatasets} title="Delete selected datasets">Delete</button></div>}<button className="add-small" aria-label="Add dataset" disabled={Boolean(pendingTrace)} onClick={() => addDataset()} title="Add dataset">+</button></div>
               <label className="range-row"><span>Curve point marker size</span><strong>{pointMarkerSize}%</strong><input aria-label="Curve point marker size" type="range" min="25" max="200" step="25" value={pointMarkerSize} onChange={(event) => setPointMarkerSize(Number(event.target.value))} /></label>
-              <div className="dataset-list">{datasets.map((dataset) => <div key={dataset.id} className={`dataset-card ${dataset.id === activeId ? 'active' : ''}`}>
+              <p className="dataset-selection-hint">Drag the handle to reorder. Ctrl-click to merge or delete several.</p>
+              <div className="dataset-list">{datasets.map((dataset) => <div key={dataset.id} className={`dataset-card ${dataset.id === activeId ? 'active' : ''} ${selectedDatasetIds.includes(dataset.id) ? 'multi-selected' : ''} ${datasetDropTarget?.id === dataset.id ? datasetDropTarget.after ? 'drop-after' : 'drop-before' : ''}`}
+                onDragOver={(event) => { if (draggedDatasetId.current && draggedDatasetId.current !== dataset.id) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.offsetHeight / 2; setDatasetDropTarget((current) => current?.id === dataset.id && current.after === after ? current : { id: dataset.id, after }) } }}
+                onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDatasetDropTarget(null) }}
+                onDrop={(event) => { if (!draggedDatasetId.current) return; event.preventDefault(); event.stopPropagation(); const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.offsetHeight / 2; const id = draggedDatasetId.current; setDatasets((current) => reorderDatasets(current, id, dataset.id, after)); draggedDatasetId.current = null; setDatasetDropTarget(null) }}
+              >
                 <div className="dataset-row">
-                <button className="dataset-select" onClick={() => { setActiveId(dataset.id); if (!pendingTrace) setMode(dataset.kind === 'surge' ? 'surge' : dataset.kind === 'choke' ? 'choke' : dataset.kind === 'speed' ? 'speed' : dataset.kind === 'efficiency' && plotType === 'compressor' ? 'trace-region' : 'point') }} aria-label={`Select ${dataset.name}`}><span className="dataset-swatch" style={{ backgroundColor: dataset.color }} /><span className="dataset-meta"><span className="dataset-name">{dataset.name}</span><span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} ${dataset.speedUnit || 'RPM'}${dataset.igv === undefined ? '' : ` · IGV ${dataset.igv}${dataset.igvUnit ? ` ${dataset.igvUnit}` : ''}`}` : dataset.kind === 'efficiency' ? `${dataset.efficiencyValue ?? '—'}% contour` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span></span><span className="dataset-point-count">{dataset.points.length}</span></button>
-                <button className="dataset-delete" title={datasets.length === 1 ? 'Clear dataset points' : 'Delete dataset'} aria-label={`${datasets.length === 1 ? 'Clear' : 'Delete'} ${dataset.name}`} disabled={Boolean(pendingTrace && !pendingTrace.ids.includes(dataset.id))} onClick={() => deleteDataset(dataset.id)}><Trash2 size={14} /><span>{datasets.length === 1 ? 'Clear' : 'Delete'}</span></button>
+                {!pendingTrace && <button className="dataset-drag" draggable aria-label={`Reorder ${dataset.name}`} title="Drag to reorder; arrow keys move the dataset" onDragStart={(event) => { draggedDatasetId.current = dataset.id; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', dataset.id) }} onDragEnd={() => { draggedDatasetId.current = null; setDatasetDropTarget(null) }} onKeyDown={(event) => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); moveDataset(dataset.id, event.key === 'ArrowUp' ? -1 : 1) } }}><GripVertical size={14} /></button>}
+                <div className="dataset-entry">
+                  <button className="dataset-select" onClick={(event) => selectDataset(dataset, event.ctrlKey || event.metaKey)} onKeyDown={(event) => { if (event.key === 'Delete' && !pendingTrace && selectedDatasetIds.length > 1) { event.preventDefault(); event.stopPropagation(); deleteSelectedDatasets() } }} aria-label={`Select ${dataset.name}`} aria-pressed={selectedDatasetIds.includes(dataset.id)} />
+                  <label className="dataset-swatch" title="Change dataset color"><input aria-label={`Color ${dataset.name}`} type="color" disabled={Boolean(pendingTrace)} value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label>
+                  <span className="dataset-meta">
+                    <span className="dataset-title">{editingDatasetName?.id === dataset.id ? <form className="dataset-name-editor" onSubmit={(event) => { event.preventDefault(); saveDatasetName() }}><input autoFocus aria-label={`Rename ${dataset.name}`} value={editingDatasetName.value} onChange={(event) => setEditingDatasetName({ id: dataset.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingDatasetName(null) } }} /><button type="submit" title="Confirm name" aria-label="Confirm name"><Check size={12} /></button></form> : <><span className="dataset-name">{dataset.name}</span>{!pendingTrace && <button className="dataset-edit-name" title="Rename dataset" aria-label={`Rename ${dataset.name}`} onClick={() => setEditingDatasetName({ id: dataset.id, value: dataset.name })}><Pencil size={12} /></button>}</>}</span>
+                    <span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} ${dataset.speedUnit || 'RPM'}${dataset.igv === undefined ? '' : ` · IGV ${dataset.igv}${dataset.igvUnit ? ` ${dataset.igvUnit}` : ''}`}` : dataset.kind === 'efficiency' ? `${dataset.efficiencyValue ?? '—'}% contour` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span>
+                  </span>
+                  <span className="dataset-point-count">{dataset.points.length}</span>
                 </div>
-                {!pendingTrace && dataset.id === activeId && <div className="dataset-controls"><input aria-label="Dataset name" value={dataset.name} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, name: event.target.value }))} /><label className="color-control" title="Dataset color"><input aria-label="Dataset color" type="color" value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label><button title="Export CSV" aria-label="Export CSV" onClick={() => exportDataset(dataset, 'csv')}><FileSpreadsheet size={14} /></button></div>}
+                {(pendingTrace || selectedDatasetIds.length < 2) && <button className="dataset-delete" title={datasets.length === 1 ? 'Clear dataset points' : 'Delete dataset'} aria-label={`${datasets.length === 1 ? 'Clear' : 'Delete'} ${dataset.name}`} disabled={Boolean(pendingTrace && !pendingTrace.ids.includes(dataset.id))} onClick={() => deleteDataset(dataset.id)}><Trash2 size={14} /><span>{datasets.length === 1 ? 'Clear' : 'Delete'}</span></button>}
+                </div>
+                {!pendingTrace && dataset.id === activeId && <div className="dataset-controls"><button title="Export CSV" aria-label="Export CSV" onClick={() => exportDataset(dataset, 'csv')}><FileSpreadsheet size={14} /></button></div>}
                 {!pendingTrace && dataset.kind === 'speed' && dataset.id === activeId && <>
                   <label className="rpm-control">Speed value <div><input aria-label="Speed value" type="number" step="100" value={dataset.rpm ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, rpm: event.target.value === '' ? undefined : Number(event.target.value) }))} /><input aria-label="Speed unit" value={dataset.speedUnit ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, speedUnit: event.target.value }))} /></div></label>
                   <label className="rpm-control">IGV setting <div><input aria-label="IGV value" type="number" step="1" value={dataset.igv ?? ''} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, igv: event.target.value === '' ? undefined : Number(event.target.value) }))} /><input aria-label="IGV unit" value={dataset.igvUnit ?? ''} placeholder="Optional unit" onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, igvUnit: event.target.value }))} /></div></label>
@@ -1103,7 +1341,7 @@ export default function App() {
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" disabled={Boolean(pendingTrace)} onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
-            {pendingTrace && <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">REVIEW POINTS</span><h2>Check extracted curves</h2></div></div><p className="section-copy">Compare the new points with the image and select datasets to inspect. Confirm before editing, or discard the new datasets to adjust the brush selection.</p>{pendingTrace.warnings.map((warning) => <div className="trace-hint" role="status" key={warning}>{warning}</div>)}<div className="prep-actions"><button className="prep-apply" onClick={() => { setActiveId(pendingTrace.ids.includes(activeId) ? activeId : pendingTrace.ids[0]); setPendingTrace(null); setBrushMarks([]); setBrushErasing(false); setMode('point-edit') }}>Confirm points &amp; modify</button><button className="prep-compare" onClick={() => { setDatasets((current) => current.filter((dataset) => !pendingTrace.ids.includes(dataset.id))); setActiveId(pendingTrace.previousActiveId); setPendingTrace(null); setMode('trace-region') }}>Discard points / adjust brush</button></div></section>}
+            {pendingTrace && <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">REVIEW POINTS</span><h2>Check extracted curves</h2></div></div><p className="section-copy">Compare the new points with the image and select datasets to inspect. Confirm before editing, or discard the new datasets to adjust the brush selection.</p>{pendingTrace.warnings.map((warning) => <div className="trace-hint" role="status" key={warning}>{warning}</div>)}<div className="prep-actions"><button className="prep-apply" onClick={() => { activateDataset(pendingTrace.ids.includes(activeId) ? activeId : pendingTrace.ids[0]); setPendingTrace(null); setBrushMarks([]); setBrushErasing(false); setMode('point-edit') }}>Confirm points &amp; modify</button><button className="prep-compare" onClick={() => { setDatasets((current) => current.filter((dataset) => !pendingTrace.ids.includes(dataset.id))); activateDataset(pendingTrace.previousActiveId); setPendingTrace(null); setMode('trace-region') }}>Discard points / adjust brush</button></div></section>}
             {mode === 'trace-region' || mode === 'speed' ? <section className="panel-section extraction-section">
               <div className="section-heading"><div><span className="section-kicker">CURVE EXTRACTION</span><h2>{mode === 'trace-region' ? 'Painted curve finder' : 'Automatic curve finder'}</h2></div><ScanSearch size={16} /></div>
               <p className="section-copy">{mode === 'speed' ? <>Click the speed line, or use Paint curve region for a guided trace. Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</> : 'Brush over one or more curves. Erase parts of the selection if needed, then press Auto point.'}</p>
