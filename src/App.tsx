@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
+import type { RotationPreview } from './components/DeskewPanel'
 import { detectPlotAxes, detectPlotGrid } from './lib/image-processing'
 import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-processing'
 import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, reconstructionDimensions, renderReconstruction, renderReconstructionCurveLayer } from './lib/reconstruct'
@@ -18,7 +19,7 @@ import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
 import { reorderDatasets } from './lib/dataset-order'
 import { drawDatasets } from './lib/dataset-render'
-import { rotationGeometry } from './lib/deskew'
+import { rotationGeometry, rulerCorrection } from './lib/deskew'
 import { createWorkbook } from './lib/excel-export'
 import type { BrushMark } from './lib/painted-region'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
@@ -78,7 +79,7 @@ const modeLabels: Record<ToolMode, string> = {
   surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance',
   'trace-region': 'Paint curve region',
   'grid-horizontal': 'Guide horizontal grid', 'grid-vertical': 'Guide vertical grid', 'guide-axis-x': 'Set X axis', 'guide-axis-y': 'Set Y axis', crop: 'Crop image',
-  'prep-region': 'Select plot area', 'prep-draw': 'Draw', 'prep-line': 'Draw straight line', 'prep-erase': 'Erase', 'prep-heal': 'Heal curve gap',
+  'prep-region': 'Select plot area', 'prep-draw': 'Draw', 'prep-line': 'Draw straight line', 'prep-erase': 'Erase', 'prep-heal': 'Heal curve gap', 'prep-straighten': 'Straighten ruler',
 }
 
 export default function App() {
@@ -89,6 +90,7 @@ export default function App() {
   const [upscale, setUpscale] = useState<UpscaleSetting>({ preset: 'hd', longEdge: 1920 })
   const [customLongEdge, setCustomLongEdge] = useState('1920')
   const [showOriginalPreview, setShowOriginalPreview] = useState(false)
+  const [rotationPreview, setRotationPreview] = useState<RotationPreview | null>(null)
   const [showBackground, setShowBackground] = useState(true)
   const [imagePrepared, setImagePrepared] = useState(false)
   const [preprocessing, setPreprocessing] = useState(false)
@@ -155,6 +157,7 @@ export default function App() {
   const activateDataset = (id: string) => { setActiveId(id); setSelectedDatasetIds(id ? [id] : []); setEditingDatasetName(null) }
 
   useEffect(() => { setBrushMarks([]) }, [imageUrl, sourceImageUrl])
+  useEffect(() => { setRotationPreview(null) }, [sourceImageUrl])
   useEffect(() => { setHealMark(null); setHealOptions([]); setHealChoice(0) }, [mode, reconstruction, corrections, correctionLayer])
 
   useEffect(() => {
@@ -176,6 +179,11 @@ export default function App() {
   const totalPoints = datasets.reduce((sum, dataset) => sum + dataset.points.length, 0)
   const calibrated = xAxis.points.length >= 2 && yAxis.points.length >= 2
   const calibratedPoints = useMemo(() => activeDataset?.points.map((point) => pointToData(point, xAxis, yAxis)).filter((point) => point !== null) ?? [], [activeDataset, xAxis, yAxis])
+  const previewDatasets = useMemo(() => {
+    if (!rotationPreview) return datasets
+    const geometry = rotationGeometry(rotationPreview.width, rotationPreview.height, rotationPreview.degrees)
+    return datasets.map((dataset) => ({ ...dataset, points: dataset.points.map(geometry.transformPoint) }))
+  }, [datasets, rotationPreview])
 
   const showNotice = (message: string, type: Notice['type'] = 'success') => {
     setNotice({ message, type })
@@ -873,8 +881,9 @@ export default function App() {
   }
 
   const applyDeskew = async (degrees: number) => {
-    if (!sourceImageUrl || preprocessing || !Number.isFinite(degrees) || Math.abs(degrees) > 15 || degrees === 0) return
-    if ((processedImageUrl || xAxis.points.length || yAxis.points.length) && !window.confirm('Deskewing clears the reconstruction, edits and calibration. Existing dataset points will be rotated; process the image and calibrate again. Continue?')) return
+    if (!sourceImageUrl || preprocessing || !Number.isFinite(degrees) || Math.abs(degrees) > 180) return
+    if (Math.abs(degrees) < 1e-10) { setMode('select'); showNotice('The selected line is already straight.'); return }
+    if ((processedImageUrl || xAxis.points.length || yAxis.points.length) && !window.confirm('Rotating clears the reconstruction, edits and calibration. Existing dataset points will be rotated; process the image and calibrate again. Continue?')) return
     const run = ++processingRun.current
     setPreprocessing(true)
     try {
@@ -891,16 +900,22 @@ export default function App() {
       setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.map(geometry.transformPoint) })))
       setXAxis(blankAxis()); setYAxis(blankAxis()); setFourPointPixels([])
       setImageUrl(rotated); setSourceImageUrl(rotated); setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false)
+      setRotationPreview(null); setShowBackground(true)
       setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] }); setPlotRegion(null)
       setAxisGuides({ horizontal: null, vertical: null }); setReconstruction(null); setCorrections([])
       setNeedsProcess(true); setImagePrepared(false); setWorkflowStep('image'); setCalibrationConfirmed(false); setMode('select')
       setPointSelectionVersion((version) => version + 1)
-      showNotice('Deskew applied. Process the image and calibrate again before exporting values.')
+      showNotice('Rotation applied. Process the image and calibrate again before exporting values.')
     } catch (error) {
       if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Could not deskew the image.', 'error')
     } finally {
       if (run === processingRun.current) setPreprocessing(false)
     }
+  }
+
+  const straightenFromRuler = (start: PixelPoint, end: PixelPoint) => {
+    try { void applyDeskew(rulerCorrection(start, end)) }
+    catch (error) { showNotice(error instanceof Error ? error.message : 'Could not straighten the image.', 'error') }
   }
 
   const getExportPoints = (dataset: Dataset) => dataset.points
@@ -1104,10 +1119,10 @@ export default function App() {
       <header className="topbar">
         <a className="brand" href="#" aria-label="Plotline home"><span className="brand-mark"><span /><span /><span /></span><span>plotline</span><span className="brand-divider" /><span className="brand-subtitle">DIGITIZER</span></a>
         <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={imageName} onChange={(event) => setImageName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
-        <div className="top-actions"><button className="top-quiet" disabled={Boolean(pendingTrace)} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={!sourceImageUrl || Boolean(pendingTrace)}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
+        <div className="top-actions" inert={Boolean(rotationPreview)}><button className="top-quiet" disabled={Boolean(pendingTrace)} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={!sourceImageUrl || Boolean(pendingTrace)}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
       </header>
 
-      <div className="type-ribbon" inert={Boolean(pendingTrace)}><span className="ribbon-label">PLOT TYPE</span><div className="plot-tabs" role="tablist" aria-label="Plot type">
+      <div className="type-ribbon" inert={Boolean(pendingTrace || rotationPreview)}><span className="ribbon-label">PLOT TYPE</span><div className="plot-tabs" role="tablist" aria-label="Plot type">
         {plotOptions.map(({ id, label, icon: Icon }) => <button key={id} role="tab" aria-selected={plotType === id} className={plotType === id ? 'plot-tab active' : 'plot-tab'} onClick={() => { setPlotType(id); setMode(workflowStep === 'digitize' ? (id === 'compressor' ? 'surge' : 'point') : 'select') }}><Icon size={15} /><span>{label}</span></button>)}
       </div><span className="type-ribbon-spacer" /><button className="icon-action" aria-label="Help" title="Click to add calibration or digitized points. Right-click for canvas actions." onClick={() => showNotice('Set X/Y calibration, choose Add points, then click the chart. Right-click for canvas actions.')}><CircleHelp size={17} /></button></div>
 
@@ -1116,7 +1131,7 @@ export default function App() {
       </nav>
 
       <div className="workspace">
-        <aside className="left-rail" inert={Boolean(pendingTrace)}>
+        <aside className="left-rail" inert={Boolean(pendingTrace || rotationPreview)}>
           <div className="rail-section"><div className="rail-heading"><span>TOOLS</span></div>
             {workflowStep === 'calibration' && <><div className="tool-group-label">CALIBRATION</div>
             <button className={`tool-button ${mode === 'calibrate-x' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('x')} disabled={!imagePrepared}><span className="tool-icon axis-x-icon">X</span><span>Calibrate X axis</span><kbd>{xAxis.points.length}/2</kbd></button>
@@ -1146,11 +1161,11 @@ export default function App() {
         </aside>
 
         <section className="center-workspace" aria-label="Plot workspace">
-          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right"><button onClick={toggleCompare} disabled={!processedImageUrl || !sourceImageUrl} aria-label={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} title={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} aria-pressed={showOriginalPreview}><Eye size={14} /> {showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button><button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo last point" onClick={() => { if (activeDataset) { updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) })); setPointSelectionVersion((version) => version + 1) } }} disabled={Boolean(pendingTrace) || workflowStep !== 'digitize' || !activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
+          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right" inert={Boolean(rotationPreview)}><button onClick={toggleCompare} disabled={!processedImageUrl || !sourceImageUrl || mode === 'prep-straighten'} aria-label={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} title={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} aria-pressed={showOriginalPreview}><Eye size={14} /> {showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button><button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl || mode === 'prep-straighten'} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo last point" onClick={() => { if (activeDataset) { updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) })); setPointSelectionVersion((version) => version + 1) } }} disabled={Boolean(pendingTrace) || workflowStep !== 'digitize' || !activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
-            <PlotCanvas imageUrl={showOriginalPreview ? sourceImageUrl : imageUrl} displayImageUrl={!showOriginalPreview && processedImageUrl ? processedPreviewUrl : null} onImageError={() => showNotice('Could not load the plot image or upscaled preview.', 'error')} onSaveError={(message) => showNotice(message, 'error')} imageName={imageName} imageLabel={showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Reconstructed plot' : 'Original image'} showBackground={showBackground} datasets={datasets} activeDatasetId={activeId} selectionVersion={pointSelectionVersion} onSelectDataset={activateDataset} mode={mode} gridGuides={showGuides ? gridGuides : { horizontal: [], vertical: [] }} axisGuides={showGuides ? axisGuides : { horizontal: null, vertical: null }} plotRegion={showGuides ? plotRegion : null}
-              calibrationMarkers={calibrationConfirmed && mode !== 'calibrate-edit' ? [] : [
+            <PlotCanvas imageUrl={rotationPreview?.url ?? (showOriginalPreview ? sourceImageUrl : imageUrl)} displayImageUrl={!rotationPreview && !showOriginalPreview && processedImageUrl ? processedPreviewUrl : null} onImageError={() => showNotice('Could not load the plot image or upscaled preview.', 'error')} onSaveError={(message) => showNotice(message, 'error')} imageName={imageName} imageLabel={rotationPreview ? 'Rotation preview — not applied' : showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Reconstructed plot' : 'Original image'} showBackground={Boolean(rotationPreview) || showBackground} datasets={previewDatasets} activeDatasetId={activeId} selectionVersion={pointSelectionVersion} onSelectDataset={activateDataset} mode={mode} gridGuides={!rotationPreview && showGuides && mode !== 'prep-straighten' ? gridGuides : { horizontal: [], vertical: [] }} axisGuides={!rotationPreview && showGuides && mode !== 'prep-straighten' ? axisGuides : { horizontal: null, vertical: null }} plotRegion={!rotationPreview && showGuides && mode !== 'prep-straighten' ? plotRegion : null}
+              calibrationMarkers={rotationPreview || mode === 'prep-straighten' || (calibrationConfirmed && mode !== 'calibrate-edit') ? [] : [
                 ...xAxis.points.map((point, index) => ({ axis: 'x' as const, index, point, value: point.value, label: `X${index + 1}` })),
                 ...yAxis.points.map((point, index) => ({ axis: 'y' as const, index, point, value: point.value, label: `Y${index + 1}` })),
               ]}
@@ -1175,7 +1190,7 @@ export default function App() {
               healPreview={healPreview}
               onApplyHealing={applyHealing}
               onHealChoiceChange={setHealChoice}
-              readOnly={Boolean(pendingTrace)}
+              readOnly={Boolean(pendingTrace || rotationPreview)}
               onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} canDeletePoint={workflowStep === 'digitize'}
               onDeleteSelectedPoint={(datasetId, index) => updateDataset(datasetId, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) }))}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
@@ -1186,6 +1201,7 @@ export default function App() {
                 setPlotRegion(rect); setNeedsProcess(true); setImagePrepared(false); setMode('select')
                 showNotice('Plot area selected. Press Process image to rebuild it.')
               }}
+              onStraighten={straightenFromRuler}
               onMovePoint={(datasetId, index, point) => updateDataset(datasetId, (dataset) => ({ ...dataset, points: dataset.points.map((current, pointIndex) => pointIndex === index ? point : current) }))}
               onMoveCalibrationPoint={updateCalibrationPoint}
               onTraceRegion={tracePaintedRegion} />
@@ -1213,15 +1229,16 @@ export default function App() {
         </section>
 
         <aside className="right-panel">
-          <div className="panel-tabs"><button className={activePanel === 'data' ? 'active' : ''} onClick={() => setActivePanel('data')}><Layers size={14} /> Data</button><button className={activePanel === 'settings' ? 'active' : ''} disabled={Boolean(pendingTrace)} onClick={() => setActivePanel('settings')}><Settings2 size={14} /> Settings</button></div>
+          <div className="panel-tabs"><button className={activePanel === 'data' ? 'active' : ''} onClick={() => setActivePanel('data')}><Layers size={14} /> Data</button><button className={activePanel === 'settings' ? 'active' : ''} disabled={Boolean(pendingTrace || rotationPreview)} onClick={() => setActivePanel('settings')}><Settings2 size={14} /> Settings</button></div>
           {activePanel === 'data' ? <div className="panel-content">
-            {workflowStep === 'image' && <ImagePreparationPanel hasImage={Boolean(imageUrl)} sourceImageUrl={sourceImageUrl} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} needsProcess={needsProcess} hasRegion={Boolean(plotRegion)} correctionCount={corrections.length} correctionLayer={correctionLayer} eraserWidth={eraserWidth} drawWidth={drawWidth} snapDrawing={snapDrawing} healBrushWidth={healBrushWidth} healingPreview={Boolean(healPreview)} healChoice={healChoice} upscale={upscale} customLongEdge={customLongEdge} widths={reconstructionWidths} widthsRequireProcess={!reconstruction || needsProcess} gridGuides={gridGuides} axisGuides={axisGuides} regularGrid={regularGrid} mode={mode}
+            {workflowStep === 'image' && <ImagePreparationPanel hasImage={Boolean(imageUrl)} sourceImageUrl={sourceImageUrl} hasProcessedImage={Boolean(processedImageUrl)} showingOriginal={showOriginalPreview} processing={preprocessing} needsProcess={needsProcess} hasRegion={Boolean(plotRegion)} correctionCount={corrections.length} correctionLayer={correctionLayer} eraserWidth={eraserWidth} drawWidth={drawWidth} snapDrawing={snapDrawing} healBrushWidth={healBrushWidth} healingPreview={Boolean(healPreview)} healChoice={healChoice} upscale={upscale} customLongEdge={customLongEdge} widths={reconstructionWidths} widthsRequireProcess={!reconstruction || needsProcess} gridGuides={gridGuides} axisGuides={axisGuides} regularGrid={regularGrid} mode={mode} rotationPreviewActive={Boolean(rotationPreview)}
               onProcess={() => { void processImage() }}
               onDeskew={(degrees) => { void applyDeskew(degrees) }}
+              onRotationPreview={(preview) => { setRotationPreview(preview); if (preview) setMode('select') }}
               onSelectTool={(next) => {
                 if (preprocessing) return
                 if ((next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase' || next === 'prep-heal') && (!reconstruction || needsProcess)) { showNotice('Process the image before editing the reconstruction.', 'error'); return }
-                if (mode !== next && (next === 'grid-horizontal' || next === 'grid-vertical' || next === 'guide-axis-x' || next === 'guide-axis-y' || next === 'prep-region')) setShowOriginalPreview(true)
+                if (mode !== next && (next === 'grid-horizontal' || next === 'grid-vertical' || next === 'guide-axis-x' || next === 'guide-axis-y' || next === 'prep-region' || next === 'prep-straighten')) setShowOriginalPreview(true)
                 if (mode !== next && (next === 'prep-draw' || next === 'prep-line' || next === 'prep-erase' || next === 'prep-heal')) setShowOriginalPreview(false)
                 if (next === 'prep-heal') setCorrectionLayer('curve')
                 setShowBackground(true); setMode(mode === next ? 'select' : next)

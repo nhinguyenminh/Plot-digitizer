@@ -85,6 +85,7 @@
 .heal-review button[aria-pressed=true] { border-color: #ffba68; color: #ffcf91; }
 .grid-guide-controls button svg { flex: none; vertical-align: middle; }
 .mode-prep-heal { cursor: crosshair; }
+.mode-prep-straighten { cursor: crosshair; }
 .canvas-context-menu {
   z-index: 20;
   min-width: 175px;

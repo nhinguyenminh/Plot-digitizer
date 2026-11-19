@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { estimateDeskew, rotationGeometry } from '../src/lib/deskew.ts'
+import { estimateDeskew, rotationGeometry, rulerCorrection } from '../src/lib/deskew.ts'
 
 function grid(width, height, angle) {
   const data = new Uint8ClampedArray(width * height * 4).fill(255)
@@ -48,4 +48,16 @@ test('rotation geometry encloses the source and transforms pixel centers consist
   const center = geometry.transformPoint({ x: 199.5, y: 149.5 })
   assert.ok(Math.abs(center.x - (geometry.width - 1) / 2) < 1e-8)
   assert.ok(Math.abs(center.y - (geometry.height - 1) / 2) < 1e-8)
+  assert.deepEqual([rotationGeometry(400, 300, 90).width, rotationGeometry(400, 300, 90).height], [300, 400])
+})
+
+test('straightens horizontal and vertical rulers in either drawing direction', () => {
+  for (const [a, b, expected] of [
+    [{ x: 10, y: 10 }, { x: 110, y: 15 }, -Math.atan(0.05) * 180 / Math.PI],
+    [{ x: 110, y: 15 }, { x: 10, y: 10 }, -Math.atan(0.05) * 180 / Math.PI],
+    [{ x: 10, y: 10 }, { x: 15, y: 110 }, Math.atan(0.05) * 180 / Math.PI],
+    [{ x: 15, y: 110 }, { x: 10, y: 10 }, Math.atan(0.05) * 180 / Math.PI],
+  ]) assert.ok(Math.abs(rulerCorrection(a, b) - expected) < 1e-8)
+  assert.throws(() => rulerCorrection({ x: 0, y: 0 }, { x: 3, y: 4 }), /10 pixels/)
+  assert.throws(() => rulerCorrection({ x: NaN, y: 0 }, { x: 20, y: 0 }), /10 pixels/)
 })

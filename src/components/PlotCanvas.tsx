@@ -60,6 +60,7 @@ interface Props {
   onSeedColor: (rgb: [number, number, number]) => void
   onCropSelection: (rect: { x: number; y: number; width: number; height: number }) => void
   onRegionSelection: (rect: PlotRegion) => void
+  onStraighten: (start: PixelPoint, end: PixelPoint) => void
   onMovePoint: (datasetId: string, index: number, point: PixelPoint) => void
   onMoveCalibrationPoint: (axis: 'x' | 'y', index: number, point: PixelPoint) => void
   onTraceRegion: (points: PixelPoint[]) => void
@@ -69,7 +70,7 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -140,6 +141,10 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   }, [contextMenu])
   useEffect(() => setSelectedPoint((current) => current?.datasetId === activeDatasetId ? current : null), [activeDatasetId])
   useEffect(() => setSelectedPoint(null), [selectionVersion])
+  useEffect(() => {
+    cropStartRef.current = null; cropCursorRef.current = null
+    setCropStart(null); setCropCursor(null)
+  }, [mode])
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     const image = imageRef.current
@@ -305,6 +310,12 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
         context.strokeStyle = '#ffffff'
         context.stroke()
       }
+      if (mode === 'prep-straighten' && cropStart && cropCursor) {
+        context.beginPath()
+        context.moveTo(mapX(cropStart.x), mapY(cropStart.y))
+        context.lineTo(mapX(cropCursor.x), mapY(cropCursor.y))
+        context.strokeStyle = '#ff4f35'; context.lineWidth = 2; context.stroke()
+      }
     }
     const lensStroke = mode === 'prep-line' && traceStroke.length > 1
       ? [traceStroke[0], traceStroke[traceStroke.length - 1]]
@@ -340,7 +351,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
     context.moveTo(0, lensCanvas.height / 2)
     context.lineTo(lensCanvas.width, lensCanvas.height / 2)
     context.stroke()
-  }, [cursor, datasets, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, previewWidth, correctionColor, correctionWidth, healPreview])
+  }, [cursor, datasets, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
 
   const toImagePoint = (event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>) => {
     const canvas = canvasRef.current!
@@ -357,7 +368,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (readOnly) return
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
-    if (mode === 'calibrate-edit' || mode === 'point-edit' || mode === 'select') return
+    if (mode === 'calibrate-edit' || mode === 'point-edit' || mode === 'select' || mode === 'prep-straighten') return
     onCanvasClick(toImagePoint(event))
     if (mode === 'point' && activeDataset) setSelectedPoint({ datasetId: activeDataset.id, index: activeDataset.points.length })
   }
@@ -409,8 +420,9 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (readOnly || event.button !== 0) return
-    if (mode === 'crop' || mode === 'prep-region') {
+    if (mode === 'crop' || mode === 'prep-region' || mode === 'prep-straighten') {
       const point = toImagePoint(event)
+      event.currentTarget.focus()
       event.currentTarget.setPointerCapture(event.pointerId)
       cropStartRef.current = point
       cropCursorRef.current = point
@@ -503,7 +515,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
     }
   }
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (traceStrokeRef.current.length) {
       const stroke = traceStrokeRef.current
       traceStrokeRef.current = []
@@ -534,14 +546,16 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
       return
     }
     const start = cropStartRef.current
-    const end = cropCursorRef.current
+    const rawEnd = mode === 'prep-straighten' && start ? toImagePoint(event) : cropCursorRef.current
+    const end = rawEnd && mode === 'prep-straighten' ? { x: Math.max(0, Math.min(dimensions.width - 1, rawEnd.x)), y: Math.max(0, Math.min(dimensions.height - 1, rawEnd.y)) } : rawEnd
     const selection = start && end ? {
       x: Math.min(start.x, end.x), y: Math.min(start.y, end.y),
       width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y),
     } : null
     if (mode === 'crop' && selection && selection.width > 5 && selection.height > 5) onCropSelection(selection)
     if (mode === 'prep-region' && selection && selection.width > 5 && selection.height > 5) onRegionSelection(selection)
-    if (mode === 'crop' || mode === 'prep-region') suppressClickRef.current = true
+    if (mode === 'prep-straighten' && start && end) onStraighten(start, end)
+    if (mode === 'crop' || mode === 'prep-region' || mode === 'prep-straighten') suppressClickRef.current = true
     cropStartRef.current = null
     cropCursorRef.current = null
     setCropStart(null)
@@ -587,7 +601,8 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
             {(healPreview || cropRect || plotRegion || (mode !== 'trace-region' && mode !== 'prep-heal' && traceStroke.length > 0) || ((mode === 'prep-erase' || mode === 'trace-region' || mode === 'prep-heal') && cursor) || gridGuides.horizontal.length > 0 || gridGuides.vertical.length > 0 || axisGuides.horizontal !== null || axisGuides.vertical !== null) && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true">
               {healPreview && <polyline points={healPreview.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke="#ff9e38" strokeWidth={Math.max(2, correctionWidth)} strokeDasharray="4 2" strokeLinecap="round" />}
               {healPreview?.length && [healPreview[0], healPreview[healPreview.length - 1]].map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={Math.max(2, correctionWidth)} fill="#ff9e38" stroke="#fff" strokeWidth="1" />)}
-              {(cropRect || plotRegion) && <rect {...(cropRect ?? plotRegion!)} />}
+              {mode !== 'prep-straighten' && (cropRect || plotRegion) && <rect {...(cropRect ?? plotRegion!)} />}
+              {mode === 'prep-straighten' && cropStart && cropCursor && <line x1={cropStart.x} y1={cropStart.y} x2={cropCursor.x} y2={cropCursor.y} stroke="#ff4f35" strokeWidth="2" vectorEffect="non-scaling-stroke" />}
               {mode !== 'trace-region' && mode !== 'prep-heal' && traceStroke.length > 1 && <polyline style={{ vectorEffect: 'none' }} points={(mode === 'prep-line' ? [traceStroke[0], traceStroke[traceStroke.length - 1]] : traceStroke).map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke={mode === 'prep-erase' ? '#e87878' : correctionColor} strokeOpacity={mode === 'prep-erase' ? '.7' : '1'} strokeWidth={mode === 'prep-erase' ? eraserWidth : correctionWidth} strokeLinecap="round" strokeLinejoin="round" />}
               {(mode === 'prep-draw' || mode === 'prep-line') && traceStroke.length === 1 && <circle cx={traceStroke[0].x} cy={traceStroke[0].y} r={Math.max(correctionWidth / 2, 1)} fill={correctionColor} />}
               {mode === 'prep-erase' && cursor && <circle className="eraser-preview" cx={cursor.x} cy={cursor.y} r={eraserWidth / 2} fill="#e87878" fillOpacity=".3" stroke="#dc3030" strokeWidth="1" />}

@@ -2,8 +2,8 @@ import type { PixelPoint } from './digitizer'
 
 export function rotationGeometry(width: number, height: number, degrees: number) {
   const radians = degrees * Math.PI / 180
-  const cosine = Math.cos(radians)
-  const sine = Math.sin(radians)
+  const cosine = Math.abs(Math.cos(radians)) < 1e-12 ? 0 : Math.cos(radians)
+  const sine = Math.abs(Math.sin(radians)) < 1e-12 ? 0 : Math.sin(radians)
   const rotatedWidth = Math.ceil(Math.abs(width * cosine) + Math.abs(height * sine))
   const rotatedHeight = Math.ceil(Math.abs(width * sine) + Math.abs(height * cosine))
   const transformPoint = ({ x, y }: PixelPoint): PixelPoint => {
@@ -15,6 +15,16 @@ export function rotationGeometry(width: number, height: number, degrees: number)
     }
   }
   return { radians, width: rotatedWidth, height: rotatedHeight, transformPoint }
+}
+
+export function rulerCorrection(start: PixelPoint, end: PixelPoint): number {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  if (![start.x, start.y, end.x, end.y].every(Number.isFinite) || Math.hypot(dx, dy) < 10) {
+    throw new Error('Draw the ruler along an axis or grid line at least 10 pixels long.')
+  }
+  const angle = Math.atan2(dy, dx) * 180 / Math.PI
+  return Math.round((Math.round(angle / 90) * 90 - angle) * 1e10) / 1e10
 }
 
 export function estimateDeskew(data: Uint8ClampedArray, width: number, height: number): number | null {

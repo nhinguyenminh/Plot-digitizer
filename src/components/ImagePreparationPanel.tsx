@@ -4,6 +4,7 @@ import type { ToolMode } from '../lib/digitizer'
 import type { AxisGuides, CorrectionLayer, ReconstructionWidths, UpscaleSetting } from '../lib/reconstruct'
 import { ERASER_MIN_WIDTH, ERASER_MAX_WIDTH } from '../lib/reconstruct'
 import DeskewPanel from './DeskewPanel'
+import type { RotationPreview } from './DeskewPanel'
 import './ImagePreparationPanel.css'
 
 interface Props {
@@ -32,6 +33,8 @@ interface Props {
   mode: ToolMode
   onProcess: () => void
   onDeskew: (degrees: number) => void
+  onRotationPreview: (preview: RotationPreview | null) => void
+  rotationPreviewActive: boolean
   onContinue: () => void
   onSelectTool: (mode: ToolMode) => void
   onCorrectionLayerChange: (layer: CorrectionLayer) => void
@@ -53,12 +56,13 @@ interface Props {
   onUndoCorrection: () => void
 }
 
-export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasProcessedImage, showingOriginal, processing, needsProcess, hasRegion, correctionCount, correctionLayer, eraserWidth, drawWidth, snapDrawing, healBrushWidth, healingPreview, healChoice, upscale, customLongEdge, widths, widthsRequireProcess, gridGuides, axisGuides, regularGrid, mode, onProcess, onDeskew, onContinue, onSelectTool, onCorrectionLayerChange, onEraserWidthChange, onDrawWidthChange, onSnapDrawingChange, onHealBrushWidthChange, onHealChoiceChange, onApplyHealing, onDiscardHealing, onUpscaleChange, onCustomLongEdgeChange, onApplyCustomUpscale, onWidthsChange, onClearRegion, onClearGridGuides, onClearAxisGuides, onRegularGridChange, onUndoCorrection }: Props) {
+export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasProcessedImage, showingOriginal, processing, needsProcess, hasRegion, correctionCount, correctionLayer, eraserWidth, drawWidth, snapDrawing, healBrushWidth, healingPreview, healChoice, upscale, customLongEdge, widths, widthsRequireProcess, gridGuides, axisGuides, regularGrid, mode, onProcess, onDeskew, onRotationPreview, rotationPreviewActive, onContinue, onSelectTool, onCorrectionLayerChange, onEraserWidthChange, onDrawWidthChange, onSnapDrawingChange, onHealBrushWidthChange, onHealChoiceChange, onApplyHealing, onDiscardHealing, onUpscaleChange, onCustomLongEdgeChange, onApplyCustomUpscale, onWidthsChange, onClearRegion, onClearGridGuides, onClearAxisGuides, onRegularGridChange, onUndoCorrection }: Props) {
   return <section className="panel-section image-prep-section">
     <div className="section-heading"><div><span className="section-kicker">STEP 01 · FIRST</span><h2>Process image</h2></div><span className="prep-step-icon"><WandSparkles size={14} /></span></div>
     <p className="section-copy">Rebuild lines on a white background, then compare and correct them. This is an experimental detector: check every curve and intersection.</p>
     {!hasImage ? <div className="prep-empty"><ScanSearch size={17} /><span>Paste, drop, or choose a plot image to begin.</span></div> : <>
-      {sourceImageUrl && <DeskewPanel imageUrl={sourceImageUrl} disabled={processing} onApply={onDeskew} />}
+      {sourceImageUrl && <DeskewPanel imageUrl={sourceImageUrl} disabled={processing} rulerActive={mode === 'prep-straighten'} onRuler={() => onSelectTool('prep-straighten')} onPreview={onRotationPreview} onApply={onDeskew} />}
+      <div inert={rotationPreviewActive}>
       <button className="prep-apply prep-main" onClick={onProcess} disabled={processing}><WandSparkles size={14} /> {processing ? 'Processing…' : 'Process image'}</button>
       <div className="grid-guide-controls">
         <label className="format-control"><span>Upscale reconstruction</span><select aria-label="Upscale reconstruction" disabled={processing} value={upscale.preset} onChange={(event) => onUpscaleChange({ ...upscale, preset: event.target.value as UpscaleSetting['preset'] })}><option value="original">Original size</option><option value="hd">HD (at least 1280 × 720)</option><option value="fullhd">Full HD (at least 1920 × 1080)</option><option value="custom">Custom long edge</option></select></label>
@@ -114,6 +118,7 @@ export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasPro
         <p className="prep-compare-note">{showingOriginal ? 'Showing original scan.' : 'Showing reconstruction.'} {needsProcess ? 'Region or guides changed; press Process image again.' : 'Curves and text may be missed or confused; inspect before continuing.'}</p>
       </>}
       <button className="prep-continue" onClick={onContinue} disabled={processing || !hasProcessedImage || needsProcess}><Check size={14} /> Confirm image & continue</button>
+      </div>
     </>}
   </section>
 }

@@ -9,9 +9,10 @@
 .prep-main{width:100%;margin-top:12px}.grid-guide-controls button:disabled,.prep-compare:disabled{opacity:.45;cursor:not-allowed}
 .deskew-controls { display: flex; flex-direction: column; gap: 7px; margin: 8px 0; }
 .deskew-controls > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.deskew-controls form { display: flex; align-items: center; gap: 7px; }
+.deskew-controls button.active { border-color: #48d7bf; background: #24574a; }
 .deskew-controls button { padding: 6px 9px; border: 1px solid #4d665a; border-radius: 4px; background: #22352d; color: #d3eee2; cursor: pointer; }
 .deskew-controls button:disabled { opacity: .45; cursor: not-allowed; }
 .deskew-controls label { display: flex; align-items: center; gap: 5px; color: #b6c4ba; font-size: 10px; }
 .deskew-controls input { width: 65px; padding: 4px; border: 1px solid #53675c; border-radius: 3px; background: #141917; color: #e7ece9; }
-.deskew-controls canvas { display: block; width: 100%; max-height: 230px; object-fit: contain; background: #fff; }
 .deskew-controls small { color: #a7b6ac; line-height: 1.4; }
