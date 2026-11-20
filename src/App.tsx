@@ -14,7 +14,7 @@ import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, rec
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
 import { calibrationFromDrafts, calibrationPointsFromGrid, downloadFile, pointToData, traceColor } from './lib/digitizer'
-import { createBrushMask, extractBrushCurves } from './lib/painted-region'
+import { BRUSH_GROUPS, createBrushMask, extractBrushGroups } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
 import { reorderDatasets } from './lib/dataset-order'
@@ -210,7 +210,9 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(20)
+  const [minimumSpacing, setMinimumSpacing] = useState(2)
   const [traceBrushWidth, setTraceBrushWidth] = useState(24)
+  const [brushGroup, setBrushGroup] = useState(BRUSH_GROUPS[0].color)
   const [pointMarkerSize, setPointMarkerSize] = useState(100)
   const [brushMarks, setBrushMarks] = useState<BrushMark[]>([])
   const [brushErasing, setBrushErasing] = useState(false)
@@ -931,7 +933,7 @@ export default function App() {
       updateCorrections([...corrections, { points, erase: mode === 'prep-erase', layer: correctionLayer, width: mode === 'prep-erase' ? eraserWidth : drawWidth }])
       return
     }
-    if (mode === 'trace-region') setBrushMarks((current) => [...current, { points: guide, width: traceBrushWidth, erase: brushErasing }])
+    if (mode === 'trace-region') setBrushMarks((current) => [...current, { points: guide, width: traceBrushWidth, erase: brushErasing, group: brushGroup }])
   }
 
   const autoPaintedPoints = async () => {
@@ -953,15 +955,18 @@ export default function App() {
       const context = canvas.getContext('2d', { willReadFrequently: true })
       if (!context) throw new Error('This browser cannot analyze the plot image.')
       if (!isolatedCurveLayer) context.drawImage(image, 0, 0)
-      const mask = createBrushMask(canvas.width, canvas.height, brushMarks)
-      const maskContext = mask.getContext('2d', { willReadFrequently: true })
-      if (!maskContext) throw new Error('This browser cannot read the brush selection.')
+      const groups = BRUSH_GROUPS.filter((group) => brushMarks.some((mark) => mark.group === group.color && !mark.erase)).map((group) => {
+        const mask = createBrushMask(canvas.width, canvas.height, brushMarks.filter((mark) => mark.group === group.color))
+        const maskContext = mask.getContext('2d', { willReadFrequently: true })
+        if (!maskContext) throw new Error('This browser cannot read the brush selection.')
+        return { ...group, mask: maskContext.getImageData(0, 0, canvas.width, canvas.height).data }
+      })
       const color: [number, number, number] | undefined = isolatedCurveLayer
         ? [0, 102, 255]
         : !showOriginalPreview && processedImageUrl
         ? [1, 3, 5].map((index) => parseInt(reconstructionColors.curve.slice(index, index + 2), 16)) as [number, number, number]
         : undefined
-      const extraction = extractBrushCurves(context.getImageData(0, 0, canvas.width, canvas.height), maskContext.getImageData(0, 0, canvas.width, canvas.height).data, sampleStep, tolerance, color, Boolean(isolatedCurveLayer))
+      const extraction = extractBrushGroups(context.getImageData(0, 0, canvas.width, canvas.height), groups, sampleStep, minimumSpacing, tolerance, color, Boolean(isolatedCurveLayer))
       let curves = extraction.curves
       const kind: DatasetKind = plotType === 'compressor' && (activeDataset?.kind === 'speed' || activeDataset?.kind === 'efficiency') ? activeDataset.kind : 'curve'
       let excluded = 0
@@ -970,14 +975,14 @@ export default function App() {
         const meetsBoundary = (candidate: PixelPoint) => boundaries.some((line) => line.points.slice(1).some((end, index) => distanceToSegment(candidate, line.points[index], end) < 10))
         curves = curves.map((curve) => {
           const segments: PixelPoint[][] = [[]]
-          for (const point of curve) {
+          for (const point of curve.points) {
             if (meetsBoundary(point)) {
               if (segments[segments.length - 1].length) segments.push([])
             } else segments[segments.length - 1].push(point)
           }
-          return segments.sort((a, b) => b.length - a.length)[0]
+          return { ...curve, points: segments.sort((a, b) => b.length - a.length)[0] }
         }).filter((curve) => {
-          if (curve.length >= 2) return true
+          if (curve.points.length >= 2) return true
           excluded++
           return false
         })
@@ -986,12 +991,13 @@ export default function App() {
         showNotice(excluded ? 'No speed curves remain after applying the surge and choke boundaries.' : 'No curves found in the painted region. Check the selection, color, and tolerance.', 'error')
         return
       }
-      const next = curves.map((points, index) => {
+      const next = curves.map((curve, index) => {
         const dataset = defaultDataset(datasets.length + index + 1, kind)
         dataset.name = kind === 'speed' ? `Speed line ${datasets.filter((item) => item.kind === kind).length + index + 1}`
           : kind === 'efficiency' ? `Efficiency contour ${datasets.filter((item) => item.kind === kind).length + index + 1}`
             : `Trace ${datasets.filter((item) => item.kind === kind).length + index + 1}`
-        dataset.points = points
+        dataset.name += ` (${curve.group})`
+        dataset.points = curve.points
         return dataset
       })
       setDatasets((current) => [...current, ...next])
@@ -1615,6 +1621,7 @@ export default function App() {
                 : { x: 'X', y: 'Y' }}
               coordinateScales={{ x: xAxis.scale, y: yAxis.scale }}
               traceBrushWidth={traceBrushWidth}
+              brushGroup={brushGroup}
               eraserWidth={eraserWidth}
               brushMarks={brushMarks}
               brushErasing={brushErasing}
@@ -1810,9 +1817,10 @@ export default function App() {
               <p className="section-copy">{mode === 'speed' ? <>Click the speed line, or use Paint curve region for a guided trace. Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</> : 'Brush over one or more curves. Erase parts of the selection if needed, then press Auto point.'}</p>
               <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" disabled={mode === 'trace-region' && (showOriginalPreview || !processedImageUrl || Boolean(reconstruction && !needsProcess))} value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
               <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="60" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
+              {mode === 'trace-region' && <label className="range-row"><span>Minimum point distance</span><strong>{minimumSpacing} px</strong><input aria-label="Minimum point distance" type="range" min="0" max="30" value={minimumSpacing} onChange={(event) => setMinimumSpacing(Number(event.target.value))} /></label>}
               <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
-              {mode === 'trace-region' && <><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selection</button></div><div className="prep-actions"><button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>Auto point</button><button className="prep-compare" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear brush</button></div></>}
-              <div className="trace-hint"><Sparkles size={13} /> Each separate brush region should contain one curve. Erase between touching regions. Auto point uses the curve layer when available; color tolerance applies to composite images. Inspect gaps and every result.</div>
+              {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div><div className="prep-actions"><button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>Auto point</button><button className="prep-compare" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button></div></>}
+              <div className="trace-hint"><Sparkles size={13} /> Each color is extracted separately, even where brushes overlap. Each connected region should contain one curve. Auto point uses the curve layer when available; inspect crossings, gaps and every result.</div>
             </section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
             </>}

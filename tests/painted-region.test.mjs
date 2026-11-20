@@ -1,6 +1,63 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractBrushCurves, extractPaintedCurves } from '../src/lib/painted-region.ts'
+import { extractBrushCurves, extractBrushGroups, extractPaintedCurves, minimumPointSpacing } from '../src/lib/painted-region.ts'
+
+test('minimum distance removes close points while preserving both endpoints', () => {
+  const points = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 5, y: 0 }, { x: 9, y: 0 }, { x: 10, y: 0 }]
+  assert.deepEqual(minimumPointSpacing(points, 3), [points[0], points[2], points[4]])
+  assert.deepEqual(minimumPointSpacing(points, 0), points)
+  assert.deepEqual(minimumPointSpacing(points.slice(0, 2), 3), [points[0]])
+  assert.deepEqual(minimumPointSpacing([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 1, y: 0 }], 3), [{ x: 0, y: 0 }, { x: 10, y: 0 }])
+  assert.throws(() => minimumPointSpacing(points, -1), /non-negative/)
+})
+
+test('one brush group can create multiple datasets independently of an overlapping group', () => {
+  const { image, mask } = fixture()
+  const green = new Uint8ClampedArray(mask.length)
+  for (let x = 10; x < 90; x++) {
+    mask[(30 * image.width + x) * 4 + 3] = 0
+    for (let y = 37; y <= 43; y++) green[(y * image.width + x) * 4 + 3] = 255
+  }
+  const result = extractBrushGroups(image, [{ name: 'Red', mask }, { name: 'Green', mask: green }], 20, 2, 76, [0, 102, 255])
+  assert.equal(result.curves.filter((curve) => curve.group === 'Red').length, 2)
+  assert.equal(result.curves.filter((curve) => curve.group === 'Green').length, 1)
+  assert.equal(result.curves.find((curve) => curve.group === 'Green').points[0].y, 40)
+})
+
+test('overlapping brush groups are extracted independently and report empty groups', () => {
+  const width = 100, height = 60
+  const data = new Uint8ClampedArray(width * height * 4).fill(255)
+  const red = new Uint8ClampedArray(data.length), green = new Uint8ClampedArray(data.length)
+  for (let x = 10; x < 90; x++) {
+    const crossingY = 10 + Math.round((x - 10) / 2)
+    for (const y of [30, crossingY]) {
+      const offset = (y * width + x) * 4
+      data[offset] = 0; data[offset + 1] = 102; data[offset + 2] = 255
+    }
+    for (let dy = -2; dy <= 2; dy++) {
+      red[((30 + dy) * width + x) * 4 + 3] = 255
+      green[((crossingY + dy) * width + x) * 4 + 3] = 255
+    }
+  }
+  const result = extractBrushGroups({ width, height, data }, [
+    { name: 'Red', color: '#f00', mask: red },
+    { name: 'Green', color: '#0f0', mask: green },
+    { name: 'Empty', color: '#00f', mask: new Uint8ClampedArray(data.length) },
+  ], 10, 3, 76, [0, 102, 255])
+  for (const group of ['Red', 'Green']) {
+    assert.ok(result.curves.some((curve) => curve.group === group && curve.points[0].x === 10 && curve.points.at(-1).x === 89))
+  }
+  const horizontal = result.curves.find((curve) => curve.group === 'Red' && curve.points[0].x === 10 && curve.points.at(-1).x === 89)
+  const diagonal = result.curves.find((curve) => curve.group === 'Green' && curve.points[0].x === 10 && curve.points.at(-1).x === 89)
+  assert.ok(horizontal.points.every((point) => Math.abs(point.y - 30) <= 2))
+  assert.ok(diagonal.points.every((point) => Math.abs(point.y - (10 + (point.x - 10) / 2)) <= 2))
+  assert.ok(result.warnings.some((warning) => /Empty:.*empty/.test(warning)))
+  for (const { points } of result.curves) {
+    for (let i = 0; i < points.length; i++) for (let j = 0; j < i; j++) {
+      assert.ok(Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y) >= 3)
+    }
+  }
+})
 
 function fixture() {
   const width = 100

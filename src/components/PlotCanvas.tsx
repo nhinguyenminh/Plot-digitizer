@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { pointToData } from '../lib/digitizer'
 import { drawDatasets } from '../lib/dataset-render'
-import { createBrushMask } from '../lib/painted-region'
+import { BRUSH_GROUPS, createBrushMask } from '../lib/painted-region'
 import type { BrushMark } from '../lib/painted-region'
 import type { GridGuides } from '../lib/image-processing'
 import type { AxisGuides, PlotRegion } from '../lib/reconstruct'
@@ -46,6 +46,7 @@ interface Props {
   coordinateLabels: { x: string; y: string }
   coordinateScales: { x: ScaleType; y: ScaleType }
   traceBrushWidth: number
+  brushGroup: string
   eraserWidth: number
   brushMarks: BrushMark[]
   brushErasing: boolean
@@ -70,7 +71,7 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -122,15 +123,28 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   }, [curveColor, datasets, dimensions, imageUrl])
   const brushOverlay = useMemo(() => {
     if (!dimensions.width || !dimensions.height || (mode !== 'trace-region' && mode !== 'prep-heal')) return null
-    const liveMark = traceStroke.length ? [{ points: traceStroke, width: previewWidth, erase: mode === 'trace-region' && brushErasing }] : []
-    const marks = mode === 'trace-region' ? brushMarks : healMark ? [healMark] : []
-    const overlay = createBrushMask(dimensions.width, dimensions.height, [...marks, ...liveMark])
-    const context = overlay.getContext('2d')!
-    context.globalCompositeOperation = 'source-in'
-    context.fillStyle = brushColor
-    context.fillRect(0, 0, overlay.width, overlay.height)
+    const liveMark = traceStroke.length ? [{ points: traceStroke, width: previewWidth, erase: mode === 'trace-region' && brushErasing, group: brushGroup }] : []
+    const overlay = document.createElement('canvas')
+    overlay.width = dimensions.width; overlay.height = dimensions.height
+    const context = overlay.getContext('2d')
+    if (!context) throw new Error('This browser cannot draw the brush overlay.')
+    context.globalCompositeOperation = 'multiply'
+    const groups = mode === 'trace-region'
+      ? BRUSH_GROUPS.map((group) => ({ color: group.color, marks: [...brushMarks, ...liveMark].filter((mark) => mark.group === group.color) }))
+      : [{ color: brushColor, marks: [...(healMark ? [healMark] : []), ...liveMark] }]
+    for (const group of groups) {
+      if (!group.marks.length) continue
+      const mask = createBrushMask(dimensions.width, dimensions.height, group.marks)
+      const maskContext = mask.getContext('2d')
+      if (!maskContext) throw new Error('This browser cannot draw the brush overlay.')
+      maskContext.globalCompositeOperation = 'source-in'
+      maskContext.fillStyle = group.color
+      maskContext.fillRect(0, 0, mask.width, mask.height)
+      context.globalAlpha = 0.75
+      context.drawImage(mask, 0, 0)
+    }
     return overlay
-  }, [dimensions, mode, brushMarks, healMark, traceStroke, previewWidth, brushErasing, brushColor])
+  }, [dimensions, mode, brushMarks, healMark, traceStroke, previewWidth, brushErasing, brushColor, brushGroup])
   useEffect(() => {
     if (!contextMenu) return
     const dismiss = () => setContextMenu(null)
@@ -335,11 +349,11 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
     if (mode === 'prep-erase' || mode === 'trace-region' || mode === 'prep-heal') {
       context.beginPath()
       context.arc(lensCanvas.width / 2, lensCanvas.height / 2, previewWidth * lensCanvas.width / sourceSize / 2, 0, Math.PI * 2)
-      context.fillStyle = (mode === 'trace-region' && !brushErasing) || mode === 'prep-heal' ? brushColor : 'rgba(232, 120, 120, 0.3)'
+      context.fillStyle = mode === 'trace-region' && !brushErasing ? brushGroup : mode === 'prep-heal' ? brushColor : 'rgba(232, 120, 120, 0.3)'
       context.globalAlpha = (mode === 'trace-region' && !brushErasing) || mode === 'prep-heal' ? 0.3 : 1
       context.fill()
       context.globalAlpha = 1
-      context.strokeStyle = (mode === 'trace-region' && !brushErasing) || mode === 'prep-heal' ? brushColor : '#dc3030'
+      context.strokeStyle = mode === 'trace-region' && !brushErasing ? brushGroup : mode === 'prep-heal' ? brushColor : '#dc3030'
       context.lineWidth = 1.5
       context.stroke()
     }
@@ -351,7 +365,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
     context.moveTo(0, lensCanvas.height / 2)
     context.lineTo(lensCanvas.width, lensCanvas.height / 2)
     context.stroke()
-  }, [cursor, datasets, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
+  }, [cursor, datasets, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
 
   const toImagePoint = (event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>) => {
     const canvas = canvasRef.current!
@@ -606,7 +620,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
               {mode !== 'trace-region' && mode !== 'prep-heal' && traceStroke.length > 1 && <polyline style={{ vectorEffect: 'none' }} points={(mode === 'prep-line' ? [traceStroke[0], traceStroke[traceStroke.length - 1]] : traceStroke).map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke={mode === 'prep-erase' ? '#e87878' : correctionColor} strokeOpacity={mode === 'prep-erase' ? '.7' : '1'} strokeWidth={mode === 'prep-erase' ? eraserWidth : correctionWidth} strokeLinecap="round" strokeLinejoin="round" />}
               {(mode === 'prep-draw' || mode === 'prep-line') && traceStroke.length === 1 && <circle cx={traceStroke[0].x} cy={traceStroke[0].y} r={Math.max(correctionWidth / 2, 1)} fill={correctionColor} />}
               {mode === 'prep-erase' && cursor && <circle className="eraser-preview" cx={cursor.x} cy={cursor.y} r={eraserWidth / 2} fill="#e87878" fillOpacity=".3" stroke="#dc3030" strokeWidth="1" />}
-              {mode === 'trace-region' && cursor && <circle cx={cursor.x} cy={cursor.y} r={traceBrushWidth / 2} fill={brushErasing ? '#e87878' : brushColor} fillOpacity=".25" stroke={brushErasing ? '#dc3030' : brushColor} strokeWidth="1" />}
+              {mode === 'trace-region' && cursor && <circle cx={cursor.x} cy={cursor.y} r={traceBrushWidth / 2} fill={brushErasing ? '#e87878' : brushGroup} fillOpacity=".25" stroke={brushErasing ? '#dc3030' : brushGroup} strokeWidth="1" />}
               {mode === 'prep-heal' && cursor && <circle cx={cursor.x} cy={cursor.y} r={healBrushWidth / 2} fill={brushColor} fillOpacity=".25" stroke={brushColor} strokeWidth="1" />}
               {gridGuides.horizontal.map((y, index) => <line key={`horizontal-${index}`} x1="0" x2={dimensions.width} y1={y} y2={y} stroke="#c7b5ff" strokeOpacity=".85" strokeWidth="1.5" strokeDasharray="8 5" />)}
               {gridGuides.vertical.map((x, index) => <line key={`vertical-${index}`} x1={x} x2={x} y1="0" y2={dimensions.height} stroke="#c7b5ff" strokeOpacity=".85" strokeWidth="1.5" strokeDasharray="8 5" />)}

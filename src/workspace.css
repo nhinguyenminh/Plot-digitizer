@@ -224,6 +224,11 @@
   color: var(--mint);
 }
 
+.brush-groups { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+.brush-groups button { display: flex; align-items: center; gap: 4px; padding: 6px; border: 1px solid #35403b; border-radius: 6px; background: #202724; color: #d6dfda; font-size: 10px; cursor: pointer; }
+.brush-groups button[aria-pressed=true] { border-color: var(--mint); color: var(--mint); }
+.brush-groups button span { width: 10px; height: 10px; border-radius: 50%; }
+
 @media (max-width: 900px) {
   .workflow-tabs { padding: 6px 10px; gap: 5px; }
   .workflow-tab { padding: 6px; gap: 6px; }

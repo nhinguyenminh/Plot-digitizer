@@ -5,7 +5,15 @@ export interface BrushMark {
   points: PixelPoint[]
   width: number
   erase: boolean
+  group?: string
 }
+
+export const BRUSH_GROUPS = [
+  { name: 'Red', color: '#ff4f35' },
+  { name: 'Green', color: '#00ce88' },
+  { name: 'Purple', color: '#b747ff' },
+  { name: 'Cyan', color: '#00b9e8' },
+]
 
 export function createBrushMask(width: number, height: number, marks: BrushMark[]): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
@@ -169,6 +177,7 @@ export function extractBrushCurves(
   tolerance: number,
   curveColor?: [number, number, number],
   isolatedCurveLayer = false,
+  allowEmpty = false,
 ): BrushExtraction {
   const { width, height, data } = image
   if (mask.length !== width * height * 4) throw new Error('The brush selection does not match the image.')
@@ -279,7 +288,63 @@ export function extractBrushCurves(
     if (issues.length) warnings.push(`Brush region ${region}: ${issues.join(' ')}`)
     curves.push(...regionCurves.map((curve) => curve.map((point) => ({ x: point.x + left, y: point.y + top }))))
   }
-  if (!region) throw new Error('The brush selection is empty.')
+  if (!region && !allowEmpty) throw new Error('The brush selection is empty.')
+  if (!curves.length && !allowEmpty) throw new Error(warnings.join(' ') || 'No curves found in the brush selection.')
+  return { curves, warnings }
+}
+
+export function minimumPointSpacing(points: PixelPoint[], minimum: number): PixelPoint[] {
+  if (!Number.isFinite(minimum) || minimum < 0) throw new Error('Minimum point spacing must be a non-negative number.')
+  if (!minimum || points.length < 2) return points
+  const first = points[0], last = points[points.length - 1]
+  const keepLast = Math.hypot(last.x - first.x, last.y - first.y) >= minimum
+  const cells = new Map<string, PixelPoint[]>()
+  const kept: PixelPoint[] = []
+  const insert = (point: PixelPoint) => {
+    const x = Math.floor(point.x / minimum), y = Math.floor(point.y / minimum)
+    const key = `${x},${y}`
+    cells.set(key, [...(cells.get(key) ?? []), point])
+  }
+  const isNear = (point: PixelPoint) => {
+    const x = Math.floor(point.x / minimum), y = Math.floor(point.y / minimum)
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      if (cells.get(`${x + dx},${y + dy}`)?.some((other) => Math.hypot(point.x - other.x, point.y - other.y) < minimum)) return true
+    }
+    return false
+  }
+  kept.push(first); insert(first)
+  if (keepLast) insert(last)
+  for (const point of points.slice(1, keepLast ? -1 : undefined)) {
+    if (!isNear(point)) { kept.push(point); insert(point) }
+  }
+  if (keepLast) kept.push(last)
+  return kept
+}
+
+export function extractBrushGroups(
+  image: ImageData,
+  groups: { name: string; mask: Uint8ClampedArray }[],
+  spacing: number,
+  minimum: number,
+  tolerance: number,
+  curveColor?: [number, number, number],
+  isolatedCurveLayer = false,
+): { curves: { points: PixelPoint[]; group: string }[]; warnings: string[] } {
+  const curves: { points: PixelPoint[]; group: string }[] = []
+  const warnings: string[] = []
+  for (const group of groups) {
+    const result = extractBrushCurves(image, group.mask, spacing, tolerance, curveColor, isolatedCurveLayer, true)
+    warnings.push(...result.warnings.map((warning) => `${group.name}: ${warning}`))
+    if (!result.curves.length && !result.warnings.length) warnings.push(`${group.name}: The brush selection is empty.`)
+    for (const curve of result.curves) {
+      const points = minimumPointSpacing(curve, minimum)
+      if (curve.length > 1 && points.length < 2) {
+        warnings.push(`${group.name}: A curve was shorter than the minimum point spacing and was excluded.`)
+      } else {
+        curves.push({ points, group: group.name })
+      }
+    }
+  }
   if (!curves.length) throw new Error(warnings.join(' ') || 'No curves found in the brush selection.')
   return { curves, warnings }
 }
