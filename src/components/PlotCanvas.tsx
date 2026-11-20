@@ -607,7 +607,6 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   return (
     <div className={`canvas-shell ${imageUrl ? 'has-image' : ''}`}>
       {imageUrl ? <>
-        <div className="canvas-status"><span className="status-dot" /> {imageLabel} <span className="status-divider">/</span> {dimensions.width} × {dimensions.height} source px{(renderDimensions.width !== dimensions.width || renderDimensions.height !== dimensions.height) && ` · ${renderDimensions.width} × ${renderDimensions.height} rendered px`}</div>
         <div className="canvas-scroll">
           <div className="canvas-scale" style={{ transform: `scale(${scale})` }}>
             <canvas ref={canvasRef} style={{ width: dimensions.width, height: 'auto', aspectRatio: `${dimensions.width} / ${dimensions.height}` }} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={() => { traceStrokeRef.current = []; cropStartRef.current = null; cropCursorRef.current = null; setTraceStroke([]); setCropStart(null); setCropCursor(null); draggedPointRef.current = null; draggedCalibrationRef.current = null }} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Select a curve point in Modify mode and press Delete to remove it, or use arrow keys to move it; hold Shift to move ten pixels." />
@@ -629,6 +628,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
             </svg>}
           </div>
         </div>
+        <div className="canvas-status"><span className="status-dot" /> {imageLabel} <span className="status-divider">/</span> {dimensions.width} × {dimensions.height} source px{(renderDimensions.width !== dimensions.width || renderDimensions.height !== dimensions.height) && ` · ${renderDimensions.width} × ${renderDimensions.height} rendered px`}</div>
         {cursor && lensPosition && mode !== 'crop' && <div className="magnifier-lens" style={{ left: lensPosition.x, top: lensPosition.y }} aria-hidden="true"><canvas ref={lensCanvasRef} width={120} height={120} /><span>{(120 / lensSourceSize).toFixed(1)}× <i /> {Math.round(cursor.x)}, {Math.round(cursor.y)}</span></div>}
         {contextMenu && <div className="canvas-context-menu" role="menu" style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           <button role="menuitem" onClick={saveCanvas}>Save canvas as PNG</button>
