@@ -18,6 +18,7 @@ type PointSelection = { datasetId: string; index: number }
 
 interface Props {
   imageUrl: string | null
+  imageDisplayMode: 'fit' | 'original'
   displayImageUrl: string | null
   onImageError: () => void
   imageLabel: string
@@ -71,8 +72,9 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
   const draggedPointRef = useRef<PointSelection | null>(null)
@@ -87,6 +89,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   const [cursor, setCursor] = useState<PixelPoint | null>(null)
   const [scale, setScale] = useState(1)
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
+  const [viewport, setViewport] = useState({ width: 0, height: 0 })
   const [renderDimensions, setRenderDimensions] = useState({ width: 0, height: 0 })
   const [cropStart, setCropStart] = useState<PixelPoint | null>(null)
   const [cropCursor, setCropCursor] = useState<PixelPoint | null>(null)
@@ -96,6 +99,10 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   const [traceStroke, setTraceStroke] = useState<PixelPoint[]>([])
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; point: PixelPoint } | null>(null)
   const previewWidth = mode === 'prep-erase' ? eraserWidth : mode === 'prep-heal' ? healBrushWidth : traceBrushWidth
+  const fitScale = dimensions.width && dimensions.height && viewport.width && viewport.height
+    ? Math.min(1, viewport.width / dimensions.width, viewport.height / dimensions.height)
+    : 0
+  const displayScale = (imageDisplayMode === 'fit' ? fitScale : 1) * scale
   const lensSourceSize = mode === 'prep-erase' || mode === 'trace-region' || mode === 'prep-heal' ? Math.max(42, Math.ceil(previewWidth * 1.25)) : 42
   const brushColor = useMemo(() => {
     const candidates = ['#ff4f35', '#00ce88', '#b747ff', '#ff35b8', '#00b9e8']
@@ -155,6 +162,16 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   }, [contextMenu])
   useEffect(() => setSelectedPoint((current) => current?.datasetId === activeDatasetId ? current : null), [activeDatasetId])
   useEffect(() => setSelectedPoint(null), [selectionVersion])
+  useEffect(() => { setScale(1) }, [imageDisplayMode])
+  useEffect(() => {
+    const viewportElement = viewportRef.current
+    if (!viewportElement) return
+    const observer = new ResizeObserver(([entry]) => {
+      setViewport({ width: entry.contentRect.width, height: entry.contentRect.height })
+    })
+    observer.observe(viewportElement)
+    return () => observer.disconnect()
+  }, [imageUrl])
   useEffect(() => {
     cropStartRef.current = null; cropCursorRef.current = null
     setCropStart(null); setCropCursor(null)
@@ -607,9 +624,9 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
   return (
     <div className={`canvas-shell ${imageUrl ? 'has-image' : ''}`}>
       {imageUrl ? <>
-        <div className="canvas-scroll">
-          <div className="canvas-scale" style={{ transform: `scale(${scale})` }}>
-            <canvas ref={canvasRef} style={{ width: dimensions.width, height: 'auto', aspectRatio: `${dimensions.width} / ${dimensions.height}` }} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={() => { traceStrokeRef.current = []; cropStartRef.current = null; cropCursorRef.current = null; setTraceStroke([]); setCropStart(null); setCropCursor(null); draggedPointRef.current = null; draggedCalibrationRef.current = null }} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Select a curve point in Modify mode and press Delete to remove it, or use arrow keys to move it; hold Shift to move ten pixels." />
+        <div ref={viewportRef} className={`canvas-scroll ${imageDisplayMode === 'fit' ? 'canvas-fit' : 'canvas-original'}`}>
+          <div className="canvas-scale" style={{ width: dimensions.width * displayScale, height: dimensions.height * displayScale }}>
+            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={() => { traceStrokeRef.current = []; cropStartRef.current = null; cropCursorRef.current = null; setTraceStroke([]); setCropStart(null); setCropCursor(null); draggedPointRef.current = null; draggedCalibrationRef.current = null }} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Select a curve point in Modify mode and press Delete to remove it, or use arrow keys to move it; hold Shift to move ten pixels." />
             {brushOverlay && <canvas className="brush-overlay" width={dimensions.width} height={dimensions.height} ref={(canvas) => { if (canvas) { const ctx = canvas.getContext('2d'); if (ctx) { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(brushOverlay, 0, 0) } } }} />}
             {(healPreview || cropRect || plotRegion || (mode !== 'trace-region' && mode !== 'prep-heal' && traceStroke.length > 0) || ((mode === 'prep-erase' || mode === 'trace-region' || mode === 'prep-heal') && cursor) || gridGuides.horizontal.length > 0 || gridGuides.vertical.length > 0 || axisGuides.horizontal !== null || axisGuides.vertical !== null) && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true">
               {healPreview && <polyline points={healPreview.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke="#ff9e38" strokeWidth={Math.max(2, correctionWidth)} strokeDasharray="4 2" strokeLinecap="round" />}
@@ -636,7 +653,7 @@ export default function PlotCanvas({ imageUrl, displayImageUrl, onImageError, im
         </div>}
         <div className="canvas-footer">
           <span className="coordinate-readout"><span className="readout-crosshair">⌖</span> {cursorText}</span>
-          <div className="zoom-controls"><button aria-label="Zoom out" onClick={() => setScale((value) => Math.max(.5, value - .1))}>−</button><span>{Math.round(scale * 100)}%</span><button aria-label="Zoom in" onClick={() => setScale((value) => Math.min(2.5, value + .1))}>+</button><button aria-label="Reset zoom" onClick={() => setScale(1)}>↗</button></div>
+          <div className="zoom-controls"><button aria-label="Zoom out" onClick={() => setScale((value) => Math.max(.5, value - .1))}>−</button><span>{Math.round(displayScale * 100)}%</span><button aria-label="Zoom in" onClick={() => setScale((value) => Math.min(imageDisplayMode === 'fit' ? 1 : 2.5, value + .1))}>+</button><button aria-label="Reset zoom" onClick={() => setScale(1)}>↗</button></div>
           <span className="canvas-hint">{activeDataset?.name ?? 'No dataset selected'} <span>·</span> Select a point · arrows nudge, Shift + arrows moves 10 px</span>
         </div>
       </> : <div className="canvas-empty">
