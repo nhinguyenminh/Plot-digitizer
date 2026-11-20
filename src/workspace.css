@@ -257,6 +257,35 @@
 .brush-groups button[aria-pressed=true] { border-color: var(--mint); color: var(--mint); }
 .brush-groups button span { width: 10px; height: 10px; border-radius: 50%; }
 
+.export-control { position: relative; display: flex; z-index: 20; }
+.export-control .export-main { border-radius: 6px 0 0 6px; }
+.export-control .export-toggle { border-left: 1px solid #309c8a; border-radius: 0 6px 6px 0; padding: 8px; }
+.export-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  box-shadow: 0 6px 18px #0008;
+}
+.export-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 11px;
+  cursor: pointer;
+}
+.export-menu button:hover:not(:disabled), .export-menu button:focus-visible { background: var(--panel-3); }
+.export-menu button:disabled { opacity: .5; cursor: not-allowed; }
+
 @media (max-width: 1150px) and (min-width: 901px) {
   .workspace { grid-template-columns: 168px minmax(290px, 1fr) 280px; }
 }

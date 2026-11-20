@@ -38,6 +38,15 @@ export function datasetColor(index: number) {
 }
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
 
+export function axisName(axis: { label: string; unit: string }) {
+  const unit = axis.unit.trim()
+  return unit ? `${axis.label} (${unit})` : axis.label
+}
+
+export function csvHeader(labels: string[], quoteAll = false) {
+  return labels.map((label) => quoteAll || /[",\r\n]/.test(label) ? `"${label.replace(/"/g, '""')}"` : label).join(',')
+}
+
 export function calibrationPointsFromGrid(grid: DetectedPlotGrid): { x: CalPoint[]; y: CalPoint[] } {
   if (grid.verticalLines.length < 2 || grid.horizontalLines.length < 2) throw new Error('At least two grid lines are required on each axis.')
   const left = grid.verticalLines[0]

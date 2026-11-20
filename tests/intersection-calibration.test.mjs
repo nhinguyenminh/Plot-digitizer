@@ -1,6 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { calibrationFromDrafts, calibrationPointsFromGrid, calibrateFromIntersections, pointToData } from '../src/lib/digitizer.ts'
+import { axisName, calibrationFromDrafts, calibrationPointsFromGrid, calibrateFromIntersections, csvHeader, pointToData } from '../src/lib/digitizer.ts'
+
+test('axis units appear in CSV headers with proper escaping', () => {
+  const x = axisName({ label: 'x', unit: ' m/s ' })
+  const y = axisName({ label: 'y', unit: 'kg, "dry"' })
+  assert.equal(csvHeader([x, y]), 'x (m/s),"y (kg, ""dry"")"')
+  assert.equal(axisName({ label: 'X', unit: '  ' }), 'X')
+  assert.equal(csvHeader(['pixel_x', 'pixel_y']), 'pixel_x,pixel_y')
+  assert.equal(csvHeader(['Flow (m/s)', 'Head'], true), '"Flow (m/s)","Head"')
+})
 
 test('detected grid calibration starts at the lower left and supports either Y direction', () => {
   const points = calibrationPointsFromGrid({ verticalLines: [10, 50, 90], horizontalLines: [20, 60, 100], confidence: 1 })

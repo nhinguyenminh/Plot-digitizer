@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, ArrowDownToLine, Axis3D, Check, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
+  Activity, ArrowDownToLine, Axis3D, Check, ChevronDown, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
   Eye, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
   MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
   Target, Trash2, Undo2, Redo2, Upload,
@@ -13,7 +13,7 @@ import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-pro
 import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, reconstructionDimensions, renderReconstruction, renderReconstructionCurveLayer } from './lib/reconstruct'
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
-import { calibrationFromDrafts, calibrationPointsFromGrid, datasetColor, downloadFile, pointToData, traceColor } from './lib/digitizer'
+import { axisName, calibrationFromDrafts, calibrationPointsFromGrid, csvHeader, datasetColor, downloadFile, pointToData, traceColor } from './lib/digitizer'
 import { BRUSH_GROUPS, createBrushMask, extractBrushGroups } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
@@ -82,8 +82,6 @@ const defaultDataset = (index: number, kind: DatasetKind = 'curve', existing: Da
   speedUnit: kind === 'speed' ? 'RPM' : undefined,
   efficiencyValue: kind === 'efficiency' ? 80 : undefined,
 })
-const axisName = (axis: CompressorAxisConfig) => axis.unit ? `${axis.label} (${axis.unit})` : axis.label
-const csvField = (value: string) => `"${value.replace(/"/g, '""')}"`
 const formatCalibrationValue = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : String(value)
@@ -126,7 +124,9 @@ interface ChartState {
   xAxis: AxisCalibration
   yAxis: AxisCalibration
   compressorAxes: CompressorAxes
+  axisUnits: { x: string; y: string }
   calibrationConfirmed: boolean
+  digitizeUnlocked: boolean
   calibrationDrafts: { x: string[]; y: string[] }
   calibrationScales: { x: ScaleType; y: ScaleType }
   workflowStep: WorkflowStep
@@ -148,7 +148,7 @@ const blankChart = (): ChartState => ({
   reconstructionWidths: { curve: 1, grid: 1 }, eraserWidth: ERASER_WIDTH, drawWidth: 1,
   needsProcess: true, imagePrepared: false, plotType: 'xy', datasets: [], activeId: '',
   xAxis: blankAxis(), yAxis: blankAxis(), compressorAxes: defaultCompressorAxes,
-  calibrationConfirmed: false, workflowStep: 'image', pointMarkerSize: 100,
+  axisUnits: { x: '', y: '' }, calibrationConfirmed: false, digitizeUnlocked: false, workflowStep: 'image', pointMarkerSize: 100,
   calibrationDrafts: { x: [], y: [] }, calibrationScales: { x: 'linear', y: 'linear' },
   fourPointValues: initialFourPointValues, xValue: '0', yValue: '0', mode: 'select',
 })
@@ -207,6 +207,7 @@ export default function App() {
   const [xAxis, setXAxis] = useState<AxisCalibration>(blankAxis())
   const [yAxis, setYAxis] = useState<AxisCalibration>(blankAxis())
   const [compressorAxes, setCompressorAxes] = useState<CompressorAxes>(defaultCompressorAxes)
+  const [axisUnits, setAxisUnits] = useState({ x: '', y: '' })
   const [xValue, setXValue] = useState('0')
   const [yValue, setYValue] = useState('0')
   const [fourPointValues, setFourPointValues] = useState<FourPointValues>(initialFourPointValues)
@@ -226,6 +227,7 @@ export default function App() {
   const [workflowStep, setWorkflowStep] = useState<WorkflowStep>('image')
   const [calibrationMarkerColor, setCalibrationMarkerColor] = useState('#36d399')
   const [calibrationConfirmed, setCalibrationConfirmed] = useState(false)
+  const [digitizeUnlocked, setDigitizeUnlocked] = useState(false)
   const [sortBy, setSortBy] = useState<'x' | 'y'>('x')
   const [precision, setPrecision] = useState(6)
   const [seedColor, setSeedColor] = useState<[number, number, number]>([72, 215, 191])
@@ -234,6 +236,7 @@ export default function App() {
   const [showTable, setShowTable] = useState(false)
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const isDesktop = window.plotlineDesktop === true
   const [learningLoading, setLearningLoading] = useState(true)
   const [learningWorking, setLearningWorking] = useState(false)
@@ -256,6 +259,8 @@ export default function App() {
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
+  const exportMenu = useRef<HTMLDivElement>(null)
+  const exportMenuButton = useRef<HTMLButtonElement>(null)
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
   const processingRun = useRef(0)
   const draggedDatasetId = useRef<string | null>(null)
@@ -276,7 +281,7 @@ export default function App() {
     imageName, imageUrl, sourceImageUrl, processedImageUrl, processedPreviewUrl, upscale, gridGuides, axisGuides,
     regularGrid, plotRegion, reconstruction, corrections, reconstructionColors, reconstructionWidths, eraserWidth,
     drawWidth, needsProcess, imagePrepared, plotType, datasets, activeId, xAxis, yAxis, compressorAxes,
-    calibrationConfirmed, calibrationDrafts, calibrationScales, workflowStep, pointMarkerSize, fourPointValues, xValue, yValue, mode,
+    axisUnits, calibrationConfirmed, digitizeUnlocked, calibrationDrafts, calibrationScales, workflowStep, pointMarkerSize, fourPointValues, xValue, yValue, mode,
   }
   const currentProject = (): ProjectSnapshot => ({
     name: projectName, activeId: activeChartId,
@@ -293,8 +298,8 @@ export default function App() {
     setReconstructionColors(state.reconstructionColors); setReconstructionWidths(state.reconstructionWidths)
     setEraserWidth(state.eraserWidth); setDrawWidth(state.drawWidth); setNeedsProcess(state.needsProcess)
     setImagePrepared(state.imagePrepared); setPlotType(state.plotType); setDatasets(state.datasets)
-    setXAxis(state.xAxis); setYAxis(state.yAxis); setCompressorAxes(state.compressorAxes)
-    setCalibrationConfirmed(state.calibrationConfirmed); setWorkflowStep(state.workflowStep)
+    setXAxis(state.xAxis); setYAxis(state.yAxis); setCompressorAxes(state.compressorAxes); setAxisUnits(state.axisUnits)
+    setCalibrationConfirmed(state.calibrationConfirmed); setDigitizeUnlocked(state.digitizeUnlocked); setWorkflowStep(state.workflowStep)
     setPointMarkerSize(state.pointMarkerSize); setBrushMarks([]); setFourPointValues(state.fourPointValues)
     setXValue(state.xValue); setYValue(state.yValue)
     setMode(state.workflowStep === 'calibration' ? 'calibrate-edit' : state.mode); activateDataset(state.activeId)
@@ -342,6 +347,19 @@ export default function App() {
     window.addEventListener('pointercancel', finish)
     return () => { window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish) }
   }, [])
+
+  useEffect(() => {
+    if (!exportMenuOpen) return
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !exportMenu.current?.contains(event.target)) setExportMenuOpen(false)
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.stopPropagation(); setExportMenuOpen(false); exportMenuButton.current?.focus() }
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', handleKey)
+    return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', handleKey) }
+  }, [exportMenuOpen])
 
   useEffect(() => { setBrushMarks([]) }, [imageUrl, sourceImageUrl])
   useEffect(() => { setRotationPreview(null) }, [sourceImageUrl])
@@ -496,7 +514,7 @@ export default function App() {
     setPlotRegion(null); setAxisGuides({ horizontal: null, vertical: null }); setRegularGrid(true); setReconstruction(null); setCorrections([]); setNeedsProcess(true)
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
     setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([]); activateDataset('')
-    setCompressorAxes(defaultCompressorAxes)
+    setCompressorAxes(defaultCompressorAxes); setAxisUnits({ x: '', y: '' }); setDigitizeUnlocked(false)
     setFourPointPixels([])
     setCalibrationPhase('points'); setCalibrationDrafts({ x: [], y: [] }); setCalibrationScales({ x: 'linear', y: 'linear' })
     setWorkflowStep('image'); setCalibrationConfirmed(false); setBrushErasing(false)
@@ -1283,15 +1301,20 @@ export default function App() {
     .map((point) => ({ x: Number(point.x.toPrecision(precision)), y: Number(point.y.toPrecision(precision)) }))
 
   const getExportPoints = (dataset: Dataset) => getChartExportPoints(dataset, chartState)
+  const exportAxisLabel = (state: ChartState, axis: 'x' | 'y', isCalibrated: boolean, label: string) =>
+    !isCalibrated ? `Pixel ${axis.toUpperCase()}`
+      : state.plotType === 'compressor' ? axisName(state.compressorAxes[axis])
+        : axisName({ label, unit: state.axisUnits[axis] })
 
   const exportDataset = (dataset: Dataset, format: 'csv' | 'json') => {
     const points = getExportPoints(dataset)
     const csvRows = points.map((point) => `${point.x},${point.y}`)
     if (format === 'csv') {
-      const header = plotType === 'compressor' && calibrated
-        ? [axisName(compressorAxes.x), axisName(compressorAxes.y)].map(csvField).join(',')
-        : calibrated ? 'x,y' : 'pixel_x,pixel_y'
-      downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.csv`, [header, ...csvRows].join('\\n'), 'text/csv')
+      const labels = (['x', 'y'] as const).map((axis) => calibrated
+        ? exportAxisLabel(chartState, axis, true, axis)
+        : `pixel_${axis}`)
+      const header = csvHeader(labels, plotType === 'compressor' && calibrated)
+      downloadFile(`${dataset.name.toLowerCase().replace(/\s+/g, '-')}.csv`, [header, ...csvRows].join('\n'), 'text/csv')
     }
     else {
       const data = dataset.kind === 'speed'
@@ -1311,9 +1334,10 @@ export default function App() {
               ...(compressorAxes.y.variable === 'efficiency' ? { efficiency: points.map((point) => point.y) } : {}),
             }
           : { points }
-      downloadFile(`${dataset.name.toLowerCase().replace(/\\s+/g, '-')}.json`, JSON.stringify({
+      downloadFile(`${dataset.name.toLowerCase().replace(/\s+/g, '-')}.json`, JSON.stringify({
         name: dataset.name, kind: dataset.kind, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels',
         ...(plotType === 'compressor' ? { axes: compressorAxes } : {}),
+        ...(plotType !== 'compressor' && calibrated && (axisUnits.x.trim() || axisUnits.y.trim()) ? { units: axisUnits } : {}),
         ...data,
       }, null, 2), 'application/json')
     }
@@ -1340,7 +1364,7 @@ export default function App() {
             ...(compressorAxes.y.variable === 'efficiency' ? { efficiency: points.map((point) => point.y) } : {}),
           })),
         }
-      : { plotType, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels', datasets: datasetsData.map(({ dataset, points }) => ({ name: dataset.name, kind: dataset.kind, points })) }
+      : { plotType, coordinateSystem: calibrated ? 'calibrated' : 'image-pixels', ...(calibrated && (axisUnits.x.trim() || axisUnits.y.trim()) ? { units: axisUnits } : {}), datasets: datasetsData.map(({ dataset, points }) => ({ name: dataset.name, kind: dataset.kind, points })) }
     downloadFile(`${imageName || 'plot'}-data.json`, JSON.stringify(project, null, 2), 'application/json')
   }
 
@@ -1368,8 +1392,8 @@ export default function App() {
         output.push({
           name: chart.name,
           datasets: state.datasets.map((dataset) => ({ dataset, points: getChartExportPoints(dataset, state) })),
-          xLabel: isCalibrated ? state.plotType === 'compressor' ? axisName(state.compressorAxes.x) : 'X' : 'Pixel X',
-          yLabel: isCalibrated ? state.plotType === 'compressor' ? axisName(state.compressorAxes.y) : 'Y' : 'Pixel Y',
+          xLabel: exportAxisLabel(state, 'x', isCalibrated, 'X'),
+          yLabel: exportAxisLabel(state, 'y', isCalibrated, 'Y'),
           image: overlay,
         })
       }
@@ -1496,6 +1520,8 @@ export default function App() {
         return axis && typeof axis.label === 'string' && typeof axis.unit === 'string'
           && Object.hasOwn(compressorAxisLabels, axis.variable)
       })) throw new Error('Invalid compressor axes')
+      if (project.axisUnits !== undefined && (!project.axisUnits || !['x', 'y'].every((key) => typeof project.axisUnits[key] === 'string'))) throw new Error('Invalid axis units')
+      if (project.digitizeUnlocked !== undefined && typeof project.digitizeUnlocked !== 'boolean') throw new Error('Invalid workflow progress')
       for (const key of ['imageUrl', 'sourceImageUrl', 'processedImageUrl', 'processedPreviewUrl']) {
         if (project[key] != null && typeof project[key] !== 'string') throw new Error('Invalid image')
       }
@@ -1533,13 +1559,14 @@ export default function App() {
         eraserWidth: project.eraserWidth ?? ERASER_WIDTH, drawWidth: project.drawWidth ?? 1,
         pointMarkerSize: project.pointMarkerSize ?? 100, reconstruction: null, needsProcess: true,
         plotType: project.plotType || 'xy', compressorAxes: project.compressorAxes || defaultCompressorAxes,
+        axisUnits: project.axisUnits ?? { x: '', y: '' },
         xAxis: project.xAxis || blankAxis(), yAxis: project.yAxis || blankAxis(), datasets: project.datasets,
         calibrationDrafts: project.calibrationDrafts ?? {
           x: (project.xAxis?.points ?? []).map((point: CalPoint) => formatCalibrationValue(point.value, project.xAxis.scale)),
           y: (project.yAxis?.points ?? []).map((point: CalPoint) => formatCalibrationValue(point.value, project.yAxis.scale)),
         },
         calibrationScales: project.calibrationScales ?? { x: project.xAxis?.scale ?? 'linear', y: project.yAxis?.scale ?? 'linear' },
-        calibrationConfirmed: confirmed, workflowStep: step,
+        calibrationConfirmed: confirmed, digitizeUnlocked: project.digitizeUnlocked ?? confirmed, workflowStep: step,
         activeId: project.datasets.some((dataset: Dataset) => dataset.id === project.activeId) ? project.activeId : project.datasets[0]?.id ?? '',
         fourPointValues: project.fourPointValues ?? initialFourPointValues,
         xValue: typeof project.xValue === 'string' ? project.xValue : '0',
@@ -1568,7 +1595,10 @@ export default function App() {
   }
 
   const addCalibrationPoint = (axis: 'x' | 'y') => setMode(axis === 'x' ? 'calibrate-x' : 'calibrate-y')
-  const updateScale = (axis: 'x' | 'y', scale: ScaleType) => setCalibrationScales((current) => ({ ...current, [axis]: scale }))
+  const updateScale = (axis: 'x' | 'y', scale: ScaleType) => {
+    setCalibrationScales((current) => ({ ...current, [axis]: scale }))
+    setCalibrationConfirmed(false)
+  }
   const activePoints = activeDataset?.points.length ?? 0
   const measuredDistance = calibrated && calibratedPoints.length >= 2
     ? Math.hypot(calibratedPoints[1].x - calibratedPoints[0].x, calibratedPoints[1].y - calibratedPoints[0].y)
@@ -1595,14 +1625,25 @@ export default function App() {
     { id: 'digitize', label: 'Extract points', caption: 'Review & export' },
   ]
   const currentStepIndex = steps.findIndex((step) => step.id === workflowStep)
-  const returnToStep = (step: WorkflowStep) => {
-    const target = steps.findIndex((item) => item.id === step)
-    if (target >= currentStepIndex || pendingTrace || loading || preprocessing || gridDetecting) return
-    if (step === 'image') setImagePrepared(false)
-    setCalibrationConfirmed(false)
-    setCalibrationPhase('points')
+  const confirmCalibration = () => {
+    try {
+      const nextX = calibrationFromDrafts({ ...xAxis, scale: calibrationScales.x }, calibrationDrafts.x, 'x')
+      const nextY = calibrationFromDrafts({ ...yAxis, scale: calibrationScales.y }, calibrationDrafts.y, 'y')
+      setXAxis(nextX); setYAxis(nextY); setCalibrationConfirmed(true); setDigitizeUnlocked(true)
+      return true
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Invalid calibration values.', 'error')
+      return false
+    }
+  }
+  const goToStep = (step: WorkflowStep) => {
+    if (step === workflowStep || projectBusy || healPreview) return
+    if (step !== 'image' && !imagePrepared) return
+    if (step === 'digitize' && (!digitizeUnlocked || !confirmCalibration())) return
+    if (step === 'calibration') setCalibrationPhase(calibrationConfirmed ? 'values' : 'points')
+    if (step !== 'image' && showOriginalPreview && processedImageUrl) setShowOriginalPreview(false)
     setWorkflowStep(step)
-    setMode(step === 'calibration' ? 'calibrate-edit' : 'select')
+    setMode(step === 'calibration' ? (calibrationConfirmed ? 'select' : 'calibrate-edit') : step === 'digitize' ? 'point' : 'select')
     setActivePanel('data')
   }
 
@@ -1611,7 +1652,18 @@ export default function App() {
       <header className="topbar">
         <a className="brand" href="#" aria-label="Plotline home"><span className="brand-mark"><span /><span /><span /></span><span>plotline</span><span className="brand-divider" /><span className="brand-subtitle">DIGITIZER</span></a>
         <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
-        <div className="top-actions" inert={Boolean(rotationPreview)}><button className="top-quiet" disabled={projectBusy} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={projectBusy}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
+        <div className="top-actions" inert={Boolean(rotationPreview)}>
+          <button className="top-quiet" disabled={projectBusy} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button>
+          <button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button>
+          <div className="export-control" ref={exportMenu}>
+            <button className="export-top export-main" onClick={() => { setExportMenuOpen(false); void exportExcel() }} disabled={projectBusy}><FileSpreadsheet size={15} /> Export Excel</button>
+            <button ref={exportMenuButton} className="export-top export-toggle" aria-label="Other export formats" aria-expanded={exportMenuOpen} aria-controls="export-formats" disabled={projectBusy} onClick={() => setExportMenuOpen((open) => !open)}><ChevronDown size={15} /></button>
+            {exportMenuOpen && <div className="export-menu" id="export-formats">
+              <button disabled={projectBusy || !activeDataset?.points.length} onClick={() => { setExportMenuOpen(false); exportDataset(activeDataset, 'csv') }}>CSV · current dataset</button>
+              <button disabled={projectBusy} onClick={() => { setExportMenuOpen(false); exportAllJson() }}>JSON · current chart</button>
+            </div>}
+          </div>
+        </div>
       </header>
 
       <nav className="chart-tabs" aria-label="Project charts">
@@ -1630,7 +1682,10 @@ export default function App() {
       </div><span className="type-ribbon-spacer" /><button className="icon-action" aria-label="Help" title="Click to add calibration or digitized points. Right-click for canvas actions." onClick={() => showNotice('Set X/Y calibration, choose Add points, then click the chart. Right-click for canvas actions.')}><CircleHelp size={17} /></button></div>
 
       <nav className="workflow-tabs" aria-label="Workflow steps">
-        {steps.map((step, index) => <button key={step.id} type="button" className={`workflow-tab ${index === currentStepIndex ? 'current' : index < currentStepIndex ? 'complete' : 'locked'}`} aria-current={index === currentStepIndex ? 'step' : undefined} disabled={index >= currentStepIndex || Boolean(pendingTrace) || loading || preprocessing || gridDetecting} onClick={() => returnToStep(step.id)} title={index > currentStepIndex ? 'Complete the current step first' : index < currentStepIndex ? 'Return and confirm following steps again' : 'Current step'}><span className="workflow-number">{index < currentStepIndex ? <Check size={14} /> : `0${index + 1}`}</span><span className="workflow-label"><strong>{step.label}</strong><small>{step.caption}</small></span></button>)}
+        {steps.map((step, index) => {
+          const accessible = step.id === 'image' || (imagePrepared && (step.id === 'calibration' || digitizeUnlocked))
+          return <button key={step.id} type="button" className={`workflow-tab ${index === currentStepIndex ? 'current' : accessible ? 'complete' : 'locked'}`} aria-current={index === currentStepIndex ? 'step' : undefined} disabled={index === currentStepIndex || !accessible || projectBusy || Boolean(healPreview)} onClick={() => goToStep(step.id)} title={!accessible ? 'Complete the previous steps first' : index === currentStepIndex ? 'Current step' : 'Open step'}><span className="workflow-number">{index !== currentStepIndex && accessible ? <Check size={14} /> : `0${index + 1}`}</span><span className="workflow-label"><strong>{step.label}</strong><small>{step.caption}</small></span></button>
+        })}
       </nav>
 
       <div className="workspace">
@@ -1717,7 +1772,7 @@ export default function App() {
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
               <span>{calibrated ? `${calibratedPoints.length} points` : 'Set both axes to show data values'} · Edit pixel coordinates to fine-tune</span>
             </div>
-            <div className="data-table-scroll"><table><thead><tr><th>#</th><th>{plotType === 'compressor' ? axisName(compressorAxes.x) : 'X'}</th><th>{plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y'}</th><th>Pixel X</th><th>Pixel Y</th></tr></thead>
+            <div className="data-table-scroll"><table><thead><tr><th>#</th><th>{exportAxisLabel(chartState, 'x', true, 'X')}</th><th>{exportAxisLabel(chartState, 'y', true, 'Y')}</th><th>Pixel X</th><th>Pixel Y</th></tr></thead>
               <tbody>{(activeDataset?.points ?? []).slice(0, 120).map((point, index) => {
                 const value = pointToData(point, xAxis, yAxis)
                 return <tr key={`${point.x}-${point.y}-${index}`}>
@@ -1804,21 +1859,20 @@ export default function App() {
                   } catch (error) { showNotice(error instanceof Error ? error.message : 'Invalid reference points.', 'error') }
                 }}>Confirm positions</button>
               </> : <>
-                <p className="section-copy"><strong>2. Enter actual values</strong><br />Enter the value corresponding to each labeled marker and select the axis scales.</p>
+                <p className="section-copy"><strong>2. Enter actual values</strong><br />Enter the value corresponding to each labeled marker, select the axis scales and optionally enter units.</p>
                 {(['x', 'y'] as const).map((axis) => <AxisEditor key={axis} axis={axis}
                   coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes[axis]) : axis.toUpperCase()}
                   calibration={axis === 'x' ? xAxis : yAxis} scale={calibrationScales[axis]} drafts={calibrationDrafts[axis]}
-                  setScale={updateScale} updatePointValue={(index, value) => setCalibrationDrafts((current) => ({
-                    ...current, [axis]: current[axis].map((draft, draftIndex) => draftIndex === index ? value : draft),
-                  }))} />)}
+                  unit={plotType === 'compressor' ? compressorAxes[axis].unit : axisUnits[axis]}
+                  setUnit={(value) => plotType === 'compressor' ? updateCompressorAxis(axis, { unit: value }) : setAxisUnits((current) => ({ ...current, [axis]: value }))}
+                  setScale={updateScale} updatePointValue={(index, value) => {
+                    setCalibrationDrafts((current) => ({ ...current, [axis]: current[axis].map((draft, draftIndex) => draftIndex === index ? value : draft) }))
+                    setCalibrationConfirmed(false)
+                  }} />)}
                 <div className="calibration-confirm-row">
                   <button className="axis-detect-button" onClick={() => { setCalibrationPhase('points'); setMode('calibrate-edit') }}>Back to positions</button>
                   <button className="axis-detect-button calibration-primary" onClick={() => {
-                    try {
-                      const nextX = calibrationFromDrafts({ ...xAxis, scale: calibrationScales.x }, calibrationDrafts.x, 'x')
-                      const nextY = calibrationFromDrafts({ ...yAxis, scale: calibrationScales.y }, calibrationDrafts.y, 'y')
-                      setXAxis(nextX); setYAxis(nextY); setCalibrationConfirmed(true); setWorkflowStep('digitize'); setMode('point')
-                    } catch (error) { showNotice(error instanceof Error ? error.message : 'Invalid calibration values.', 'error') }
+                    if (confirmCalibration()) { setWorkflowStep('digitize'); setMode('point') }
                   }}>Confirm calibration & continue</button>
                 </div>
               </>}
@@ -1922,13 +1976,15 @@ export default function App() {
   )
 }
 
-function AxisEditor({ axis, coordinateLabel, calibration, scale, drafts, setScale, updatePointValue }: {
+function AxisEditor({ axis, coordinateLabel, calibration, scale, drafts, unit, setUnit, setScale, updatePointValue }: {
   axis: 'x' | 'y'; coordinateLabel: string; calibration: AxisCalibration; scale: ScaleType; drafts: string[];
+  unit: string; setUnit: (value: string) => void;
   setScale: (axis: 'x' | 'y', scale: ScaleType) => void;
   updatePointValue: (index: number, value: string) => void
 }) {
   return <div className="axis-editor">
     <div className="axis-editor-top"><span className={`axis-letter axis-${axis}`}>{axis.toUpperCase()}</span><span className="axis-label">{axis === 'x' ? 'Horizontal axis' : 'Vertical axis'}</span><select aria-label={`${axis.toUpperCase()} axis scale`} value={scale} onChange={(event) => setScale(axis, event.target.value as ScaleType)}><option value="linear">Linear</option><option value="log">Log₁₀</option><option value="inverse">Inverse</option><option value="date">Date/time</option></select></div>
     <div className="axis-point-list">{calibration.points.map((point, index) => <label key={index}><span>{axis.toUpperCase()}{index + 1}</span><input aria-label={`${coordinateLabel} calibration point ${index + 1} value`} value={drafts[index] ?? ''} placeholder={scale === 'date' ? 'Date / time' : 'Value'} onChange={(event) => updatePointValue(index, event.target.value)} /><small>{Math.round(point.x)}, {Math.round(point.y)} px</small></label>)}</div>
+    <label className="format-control"><span>{axis.toUpperCase()} unit</span><input aria-label={`${axis.toUpperCase()} axis unit`} value={unit} placeholder="Optional" onChange={(event) => setUnit(event.target.value)} /></label>
   </div>
 }
