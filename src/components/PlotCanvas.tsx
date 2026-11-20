@@ -190,7 +190,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillStyle = '#ffffff'
       context.fillRect(0, 0, image.naturalWidth, image.naturalHeight)
     }
-    drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100)
+    drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100, activeDatasetId)
     const selectedDataset = datasets.find((dataset) => dataset.id === selectedPoint?.datasetId)
     const selected = selectedPoint && selectedDataset?.points[selectedPoint.index]
     if (selected) {
@@ -244,7 +244,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillText(`${axis.toUpperCase()}${index + 1}`, labelRect.x + 4, labelRect.y + labelHeight / 2 + fontSize * 0.35)
     })
     context.restore()
-  }, [datasets, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground])
+  }, [datasets, activeDatasetId, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; displayImageRef.current = null; sourceCanvasRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -297,7 +297,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     context.drawImage(display ?? sourceCanvas, sourceLeft * scaleX, sourceTop * scaleY, sourceSize * scaleX, sourceSize * scaleY, 0, 0, lensCanvas.width, lensCanvas.height)
     const mapX = (x: number) => (x - sourceLeft) * lensCanvas.width / sourceSize
     const mapY = (y: number) => (y - sourceTop) * lensCanvas.height / sourceSize
-    drawDatasets(context, datasets, (point) => ({ x: mapX(point.x), y: mapY(point.y) }), 2, 2.5 * pointMarkerSize / 100)
+    drawDatasets(context, datasets, (point) => ({ x: mapX(point.x), y: mapY(point.y) }), 2, 2.5 * pointMarkerSize / 100, activeDatasetId)
     const selectedDataset = datasets.find((dataset) => dataset.id === selectedPoint?.datasetId)
     const selected = selectedPoint && selectedDataset?.points[selectedPoint.index]
     if (selected) {
@@ -382,7 +382,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     context.moveTo(0, lensCanvas.height / 2)
     context.lineTo(lensCanvas.width, lensCanvas.height / 2)
     context.stroke()
-  }, [cursor, datasets, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
+  }, [cursor, datasets, activeDatasetId, selectedPoint, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
 
   const toImagePoint = (event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>) => {
     const canvas = canvasRef.current!

@@ -4,6 +4,7 @@ import { readOnlineLearningConfig, syncOnlineLearning } from '../src/lib/online-
 
 const config = { url: 'https://example.supabase.co', key: 'sb_publishable_test' }
 const model = { version: 1, weights: [-4, 0, 8, 0, 0, 0, 0, 0, 0], samples: 1 }
+const pointSpacingModel = { version: 1, factor: 1.1, samples: 3 }
 const sample = (id) => ({ id, updateId: `${id}-uuid`, delta: Array(9).fill(0.1), status: 'pending' })
 
 test('requires a publishable key and a safe project URL', () => {
@@ -21,12 +22,13 @@ test('sends only numeric updates, acknowledges successes and retains failures fo
     async pendingSamples() { return queue.filter((item) => item.status === 'pending') },
     async acknowledge(id) { queue.find((item) => item.id === id).status = 'sent' },
     async cacheModel() { assert.fail('unexpected cache') },
+    async savePointSpacingModel() {},
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options })
     if (calls.length === 2) throw new Error('offline')
-    return Response.json(model)
+    return Response.json(url.endsWith('/plotline_get_point_spacing_model') ? pointSpacingModel : model)
   }
   try {
     await assert.rejects(syncOnlineLearning(store, config), /offline/)
@@ -36,6 +38,7 @@ test('sends only numeric updates, acknowledges successes and retains failures fo
     const result = await syncOnlineLearning(store, config)
     assert.equal(result.pending, 0)
     assert.equal(JSON.parse(calls[2].options.body).p_id, 'second-uuid')
+    assert.deepEqual(result.pointSpacingModel, pointSpacingModel)
   } finally { globalThis.fetch = originalFetch }
 })
 
@@ -65,15 +68,48 @@ test('sends detailed comparison and weight update together before acknowledging'
   const store = {
     async pendingSamples() { return acknowledged ? [] : [item] },
     async acknowledge() { acknowledged = true },
+    async savePointSpacingModel() {},
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
-    assert.match(url, /plotline_submit_curve_comparison$/)
-    assert.deepEqual(JSON.parse(options.body), { p_id: item.updateId, p_delta: item.delta, p_comparison: comparison })
-    return Response.json(model)
+    if (url.endsWith('/plotline_submit_curve_comparison')) {
+      assert.deepEqual(JSON.parse(options.body), { p_id: item.updateId, p_delta: item.delta, p_comparison: comparison })
+      return Response.json(model)
+    }
+    return Response.json(pointSpacingModel)
   }
   try { assert.equal((await syncOnlineLearning(store, config)).pending, 0) }
   finally { globalThis.fetch = originalFetch }
+})
+
+test('submits only a numeric spacing target and acknowledges it with the shared model', async () => {
+  const item = { id: 'spacing-sample', updateId: 'spacing-uuid', delta: [], spacingTarget: 1.15, status: 'pending' }
+  let acknowledged = false
+  const store = {
+    async pendingSamples() { return acknowledged ? [] : [item] },
+    async acknowledgePointSpacing(id, receivedModel) {
+      assert.equal(id, item.id)
+      assert.deepEqual(receivedModel, pointSpacingModel)
+      acknowledged = true
+    },
+    async cacheModel(receivedModel) { assert.deepEqual(receivedModel, model) },
+    async savePointSpacingModel(receivedModel) { assert.deepEqual(receivedModel, pointSpacingModel) },
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/plotline_submit_point_spacing_update')) {
+      assert.deepEqual(JSON.parse(options.body), { p_id: item.updateId, p_target: item.spacingTarget })
+      return Response.json(pointSpacingModel)
+    }
+    if (url.endsWith('/plotline_get_learning_model')) return Response.json(model)
+    if (url.endsWith('/plotline_get_point_spacing_model')) return Response.json(pointSpacingModel)
+    assert.fail(`unexpected learning endpoint: ${url}`)
+  }
+  try {
+    const result = await syncOnlineLearning(store, config)
+    assert.equal(result.pending, 0)
+    assert.deepEqual(result.pointSpacingModel, pointSpacingModel)
+  } finally { globalThis.fetch = originalFetch }
 })
 
 test('keeps detailed comparisons queued when the database migration is missing', async () => {
@@ -85,5 +121,17 @@ test('keeps detailed comparisons queued when the database migration is missing',
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response('', { status: 404 })
   try { await assert.rejects(syncOnlineLearning(store, config), /curve-comparisons\.sql/) }
+  finally { globalThis.fetch = originalFetch }
+})
+
+test('keeps point-spacing updates queued when the point-spacing migration is missing', async () => {
+  const item = { id: 'spacing-sample', updateId: 'spacing-uuid', delta: [], spacingTarget: 1.15, status: 'pending' }
+  const store = {
+    async pendingSamples() { return [item] },
+    async acknowledgePointSpacing() { assert.fail('failed update must remain queued') },
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('', { status: 404 })
+  try { await assert.rejects(syncOnlineLearning(store, config), /point-spacing-learning\.sql/) }
   finally { globalThis.fetch = originalFetch }
 })

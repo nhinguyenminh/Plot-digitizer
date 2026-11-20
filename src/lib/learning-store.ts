@@ -1,5 +1,7 @@
 import { initialLearningModel } from './learning'
 import type { CurveComparison, LearningModel } from './learning'
+import { initialPointSpacingModel } from './point-spacing'
+import type { PointSpacingModel } from './point-spacing'
 
 export interface TrainingSample {
   id: string
@@ -9,6 +11,7 @@ export interface TrainingSample {
   status?: 'pending' | 'sent'
   target?: string
   comparison?: CurveComparison
+  spacingTarget?: number
 }
 
 export interface LearningState {
@@ -18,6 +21,10 @@ export interface LearningState {
 
 export interface LearningStore {
   load(): Promise<LearningState>
+  loadPointSpacingModel(): Promise<PointSpacingModel>
+  savePointSpacingModel(model: PointSpacingModel): Promise<void>
+  savePointSpacingSamples(samples: TrainingSample[], model: PointSpacingModel): Promise<void>
+  acknowledgePointSpacing(id: string, model: PointSpacingModel): Promise<void>
   hasSample(id: string): Promise<boolean>
   saveSample(sample: TrainingSample, model: LearningModel): Promise<void>
   pendingSamples(): Promise<TrainingSample[]>
@@ -72,6 +79,52 @@ export function createLocalLearningStore(): LearningStore {
         return { enabled: enabled ?? true, model: model ?? initialLearningModel() }
       })
     },
+    async acknowledgePointSpacing(id, model) {
+      if (model.version !== 1 || !Number.isInteger(model.samples) || model.samples < 0
+        || !Number.isFinite(model.factor) || model.factor < 1 || model.factor > 1.2) {
+        throw new Error('Invalid online point-spacing model.')
+      }
+      await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
+        const samples = tx.objectStore('samples')
+        const sample = await get<TrainingSample>(samples, id)
+        if (!sample?.spacingTarget) throw new Error('The pending point-spacing update no longer exists.')
+        samples.put({ ...sample, status: 'sent' })
+        tx.objectStore('settings').put(model, 'point-spacing-model')
+      })
+    },
+    async loadPointSpacingModel() {
+      return transaction(['settings'], 'readonly', async (tx) => {
+        const model = await get<PointSpacingModel>(tx.objectStore('settings'), 'point-spacing-model')
+        if (!model) return initialPointSpacingModel()
+        if (model.version !== 1 || !Number.isInteger(model.samples) || model.samples < 0
+          || !Number.isFinite(model.factor) || model.factor < 1 || model.factor > 1.2) {
+          throw new Error('Invalid local point-spacing model.')
+        }
+        return model
+      })
+    },
+    async savePointSpacingModel(model) {
+      if (model.version !== 1 || !Number.isInteger(model.samples) || model.samples < 0
+        || !Number.isFinite(model.factor) || model.factor < 1 || model.factor > 1.2) {
+        throw new Error('Invalid local point-spacing model.')
+      }
+      await transaction(['settings'], 'readwrite', async (tx) => {
+        tx.objectStore('settings').put(model, 'point-spacing-model')
+      })
+    },
+    async savePointSpacingSamples(samples, model) {
+      if (model.version !== 1 || !Number.isInteger(model.samples) || model.samples < 0
+        || !Number.isFinite(model.factor) || model.factor < 1 || model.factor > 1.2
+        || samples.some((sample) => !sample.updateId || !Number.isFinite(sample.spacingTarget)
+          || (sample.spacingTarget ?? 0) < 1.05 || (sample.spacingTarget ?? 2) > 1.2)) {
+        throw new Error('Invalid point-spacing learning update.')
+      }
+      await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
+        const store = tx.objectStore('samples')
+        for (const sample of samples) store.add(sample)
+        tx.objectStore('settings').put(model, 'point-spacing-model')
+      })
+    },
     async saveSample(sample, model) {
       await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
         tx.objectStore('samples').add(sample)
@@ -107,6 +160,7 @@ export function createLocalLearningStore(): LearningStore {
       await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
         tx.objectStore('samples').clear()
         tx.objectStore('settings').delete('model')
+        tx.objectStore('settings').delete('point-spacing-model')
       })
     },
   }

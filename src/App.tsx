@@ -13,7 +13,7 @@ import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-pro
 import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, reconstructionDimensions, renderReconstruction, renderReconstructionCurveLayer } from './lib/reconstruct'
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
-import { calibrationFromDrafts, calibrationPointsFromGrid, downloadFile, pointToData, traceColor } from './lib/digitizer'
+import { calibrationFromDrafts, calibrationPointsFromGrid, datasetColor, downloadFile, pointToData, traceColor } from './lib/digitizer'
 import { BRUSH_GROUPS, createBrushMask, extractBrushGroups } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
@@ -28,6 +28,8 @@ import { createLocalLearningStore } from './lib/learning-store'
 import { learningMasksToCorrections } from './lib/learning-edits'
 import { createLearningExample } from './lib/learning-example'
 import { readOnlineLearningConfig, syncOnlineLearning } from './lib/online-learning'
+import { initialPointSpacingModel, pointSpacingTargets, trainPointSpacingModel } from './lib/point-spacing'
+import type { PointSpacingModel } from './lib/point-spacing'
 import type { LearningState, LearningStore } from './lib/learning-store'
 import type { BrushMark } from './lib/painted-region'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
@@ -41,7 +43,6 @@ type WorkflowStep = 'image' | 'calibration' | 'digitize'
 type CompressorAxisVariable = 'flow' | 'head' | 'outletPressure' | 'pressureRatio' | 'efficiency' | 'speed' | 'igv' | 'custom'
 type CompressorAxisConfig = { variable: CompressorAxisVariable; label: string; unit: string }
 type CompressorAxes = { x: CompressorAxisConfig; y: CompressorAxisConfig }
-const palette = ['#006d64', '#a34500', '#5845b0', '#b42735', '#005f99', '#795600', '#a02179']
 const plotOptions: { id: PlotType; label: string; icon: typeof LineChart }[] = [
   { id: 'xy', label: 'X-Y Plot', icon: LineChart }, { id: 'bar', label: 'Bar Chart', icon: Activity },
   { id: 'polar', label: 'Polar', icon: Target }, { id: 'ternary', label: 'Ternary', icon: Axis3D },
@@ -68,9 +69,15 @@ const distanceToSegment = (point: PixelPoint, start: PixelPoint, end: PixelPoint
   return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy))
 }
 
-const defaultDataset = (index: number, kind: DatasetKind = 'curve'): Dataset => ({
+const nextDatasetColor = (index: number, datasets: Dataset[]) => {
+  const used = new Set(datasets.map((dataset) => dataset.color.toLowerCase()))
+  let candidate = index
+  while (used.has(datasetColor(candidate).toLowerCase())) candidate++
+  return datasetColor(candidate)
+}
+const defaultDataset = (index: number, kind: DatasetKind = 'curve', existing: Dataset[] = []): Dataset => ({
   id: crypto.randomUUID(), name: kind === 'surge' ? 'Surge line' : kind === 'choke' ? 'Choke line' : kind === 'speed' ? `Speed line ${index}` : kind === 'efficiency' ? `Efficiency contour ${index}` : `Dataset ${index}`,
-  color: palette[(index - 1) % palette.length], kind, points: [],
+  color: nextDatasetColor(index, existing), kind, points: [],
   rpm: kind === 'speed' ? 10500 : undefined,
   speedUnit: kind === 'speed' ? 'RPM' : undefined,
   efficiencyValue: kind === 'efficiency' ? 80 : undefined,
@@ -210,13 +217,12 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(20)
-  const [minimumSpacing, setMinimumSpacing] = useState(2)
   const [traceBrushWidth, setTraceBrushWidth] = useState(24)
   const [brushGroup, setBrushGroup] = useState(BRUSH_GROUPS[0].color)
   const [pointMarkerSize, setPointMarkerSize] = useState(100)
   const [brushMarks, setBrushMarks] = useState<BrushMark[]>([])
   const [brushErasing, setBrushErasing] = useState(false)
-  const [pendingTrace, setPendingTrace] = useState<{ ids: string[]; previousActiveId: string; warnings: string[] } | null>(null)
+  const [pendingTrace, setPendingTrace] = useState<{ ids: string[]; previousActiveId: string; warnings: string[]; generated: Record<string, PixelPoint[]> } | null>(null)
   const [workflowStep, setWorkflowStep] = useState<WorkflowStep>('image')
   const [calibrationMarkerColor, setCalibrationMarkerColor] = useState('#36d399')
   const [calibrationConfirmed, setCalibrationConfirmed] = useState(false)
@@ -232,6 +238,7 @@ export default function App() {
   const [learningLoading, setLearningLoading] = useState(true)
   const [learningWorking, setLearningWorking] = useState(false)
   const [learningState, setLearningState] = useState<LearningState | null>(null)
+  const [pointSpacingModel, setPointSpacingModel] = useState<PointSpacingModel>(initialPointSpacingModel)
   const [learningError, setLearningError] = useState<string | null>(null)
   const [syncError, setSyncError] = useState<string | null>(null)
   const [pendingUpdates, setPendingUpdates] = useState(0)
@@ -254,6 +261,7 @@ export default function App() {
   const draggedDatasetId = useRef<string | null>(null)
   const history = useRef<History<ProjectSnapshot> | null>(null)
   const learningStore = useRef<LearningStore | null>(null)
+  const pointTrainingBaselines = useRef<Record<string, PixelPoint[]>>({})
   const learningStateRef = useRef<LearningState | null>(null)
   const learningWorkRef = useRef(false)
   const syncRef = useRef<Promise<void> | null>(null)
@@ -354,6 +362,7 @@ export default function App() {
   }, [workflowStep, calibrationPhase, pendingTrace, learningWorking])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
+  const learnedSampleStep = Math.min(60, Math.max(1, Math.round(sampleStep * pointSpacingModel.factor)))
   const showGuides = needsProcess || mode === 'grid-horizontal' || mode === 'grid-vertical' || mode === 'guide-axis-x' || mode === 'guide-axis-y' || mode === 'prep-region'
   const totalPoints = datasets.reduce((sum, dataset) => sum + dataset.points.length, 0)
   const calibrated = calibrationConfirmed && xAxis.points.length >= 2 && yAxis.points.length >= 2
@@ -372,8 +381,8 @@ export default function App() {
   useEffect(() => {
     let active = true
     if (!learningStore.current) learningStore.current = createLocalLearningStore()
-    Promise.all([learningStore.current.load(), learningStore.current.pendingSamples()]).then(([state, pending]) => {
-      if (active) { learningStateRef.current = state; setLearningState(state); setPendingUpdates(pending.length); setLearningError(null) }
+    Promise.all([learningStore.current.load(), learningStore.current.pendingSamples(), learningStore.current.loadPointSpacingModel()]).then(([state, pending, spacingModel]) => {
+      if (active) { learningStateRef.current = state; setLearningState(state); setPendingUpdates(pending.length); setPointSpacingModel(spacingModel); setLearningError(null) }
     }).catch((error: unknown) => {
       if (active) {
         const message = error instanceof Error ? error.message : 'Could not load local learning data.'
@@ -388,9 +397,10 @@ export default function App() {
     const store = learningStore.current
     if (isDesktop || !config || !store || !learningStateRef.current?.enabled || learningWorkRef.current || syncRef.current) return
     setSyncing(true)
-    const operation = syncOnlineLearning(store, config).then(({ model, pending }) => {
+    const operation = syncOnlineLearning(store, config).then(({ model, pointSpacingModel, pending }) => {
       const current = learningStateRef.current
       if (current) { const state = { ...current, model }; learningStateRef.current = state; setLearningState(state) }
+      setPointSpacingModel(pointSpacingModel)
       setPendingUpdates(pending); setSyncError(null)
     }).catch(async (error: unknown) => {
       setSyncError(error instanceof Error ? error.message : 'Could not synchronize learning updates.')
@@ -668,6 +678,7 @@ export default function App() {
       await learningStore.current.clear()
       const nextState = { ...learningState, model: initialLearningModel() }
       learningStateRef.current = nextState; setLearningState(nextState); setPendingUpdates(0); setLastComparison(null)
+      setPointSpacingModel(initialPointSpacingModel()); pointTrainingBaselines.current = {}
       showNotice('Local learning data deleted.')
     } catch (error) {
       showNotice(error instanceof Error ? `Could not delete local learning data: ${error.message}` : 'Could not delete local learning data.', 'error')
@@ -745,7 +756,7 @@ export default function App() {
 
   const addDataset = (kind?: DatasetKind) => {
     const selectedKind = kind ?? (plotType === 'compressor' ? 'speed' : 'curve')
-    const next = defaultDataset(datasets.length + 1, selectedKind)
+    const next = defaultDataset(datasets.length + 1, selectedKind, datasets)
     setDatasets((current) => [...current, next])
     activateDataset(next.id)
     setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : selectedKind === 'efficiency' ? 'trace-region' : 'point')
@@ -789,6 +800,7 @@ export default function App() {
       : `Delete all ${selectedDatasetIds.length} selected datasets and their points?`
     if (!window.confirm(message)) return
     setDatasets(remaining)
+    for (const id of selectedDatasetIds) delete pointTrainingBaselines.current[id]
     activateDataset(remaining[0]?.id ?? '')
     setPointSelectionVersion((version) => version + 1)
     showNotice(`Deleted ${selectedDatasetIds.length} datasets.`)
@@ -827,7 +839,7 @@ export default function App() {
         context.getImageData(0, 0, canvas.width, canvas.height),
         seed,
         tolerance,
-        sampleStep,
+        learnedSampleStep,
         guide,
         traceBrushWidth / 2,
         calibrated && !reviewCandidate ? {
@@ -860,13 +872,13 @@ export default function App() {
           ? activeDataset.kind
           : 'curve'
       if (reviewCandidate && activeDataset) {
-        const next = { ...activeDataset, id: crypto.randomUUID(), name: `${activeDataset.name} (retrace candidate)`, color: palette.find((color) => color !== activeDataset.color) ?? palette[0], points: traced }
+        const next = { ...activeDataset, id: crypto.randomUUID(), name: `${activeDataset.name} (retrace candidate)`, color: nextDatasetColor(datasets.length + 1, datasets), points: traced }
         setDatasets((current) => [...current, next])
         activateDataset(next.id)
       } else if (plotType === 'compressor' && activeDataset?.kind === targetKind && (targetKind === 'speed' || targetKind === 'efficiency')) {
         updateDataset(activeDataset.id, (dataset) => ({ ...dataset, points: traced }))
       } else {
-        const next = defaultDataset(datasets.length + 1, targetKind)
+        const next = defaultDataset(datasets.length + 1, targetKind, datasets)
         next.name = targetKind === 'speed'
           ? `Speed line ${datasets.filter((dataset) => dataset.kind === 'speed').length + 1}`
           : targetKind === 'efficiency'
@@ -967,7 +979,7 @@ export default function App() {
         : !showOriginalPreview && processedImageUrl
         ? [1, 3, 5].map((index) => parseInt(reconstructionColors.curve.slice(index, index + 2), 16)) as [number, number, number]
         : undefined
-      const extraction = extractBrushGroups(context.getImageData(0, 0, canvas.width, canvas.height), groups, sampleStep, minimumSpacing, tolerance, color, Boolean(isolatedCurveLayer))
+      const extraction = extractBrushGroups(context.getImageData(0, 0, canvas.width, canvas.height), groups, learnedSampleStep, tolerance, color, Boolean(isolatedCurveLayer))
       let curves = extraction.curves
       const kind: DatasetKind = plotType === 'compressor' && (activeDataset?.kind === 'speed' || activeDataset?.kind === 'efficiency') ? activeDataset.kind : 'curve'
       let excluded = 0
@@ -992,17 +1004,23 @@ export default function App() {
         showNotice(excluded ? 'No speed curves remain after applying the surge and choke boundaries.' : 'No curves found in the painted region. Check the selection, color, and tolerance.', 'error')
         return
       }
-      const next = curves.map((curve, index) => {
-        const dataset = defaultDataset(datasets.length + index + 1, kind)
+      const next: Dataset[] = []
+      for (const curve of curves) {
+        const index = next.length
+        const dataset = defaultDataset(datasets.length + index + 1, kind, [...datasets, ...next])
         dataset.name = kind === 'speed' ? `Speed line ${datasets.filter((item) => item.kind === kind).length + index + 1}`
           : kind === 'efficiency' ? `Efficiency contour ${datasets.filter((item) => item.kind === kind).length + index + 1}`
             : `Trace ${datasets.filter((item) => item.kind === kind).length + index + 1}`
         dataset.name += ` (${curve.group})`
         dataset.points = curve.points
-        return dataset
-      })
+        next.push(dataset)
+      }
       setDatasets((current) => [...current, ...next])
-      setPendingTrace({ ids: next.map((dataset) => dataset.id), previousActiveId: activeId, warnings: [...extraction.warnings, ...(!showOriginalPreview && processedImageUrl && !isolatedCurveLayer ? ['Using the composite image; process it again to separate the curve layer from the grid.'] : []), ...(excluded ? [`${excluded} speed curve candidates were removed by the boundaries.`] : [])] })
+      setPendingTrace({
+        ids: next.map((dataset) => dataset.id), previousActiveId: activeId,
+        generated: Object.fromEntries(next.map((dataset) => [dataset.id, dataset.points.map((point) => ({ ...point }))])),
+        warnings: [...extraction.warnings, ...(!showOriginalPreview && processedImageUrl && !isolatedCurveLayer ? ['Using the composite image; process it again to separate the curve layer from the grid.'] : []), ...(excluded ? [`${excluded} speed curve candidates were removed by the boundaries.`] : [])],
+      })
       activateDataset(next[0].id)
       setMode('select')
       showNotice(`Created ${next.length} curve${next.length === 1 ? '' : 's'}.${excluded ? ` ${excluded} removed by boundaries.` : ''} Review before confirming.`)
@@ -1108,7 +1126,7 @@ export default function App() {
           ? 'measurement'
           : 'curve'
       if (!activeDataset || (kind !== 'curve' && activeDataset.kind !== kind)) {
-        const next = defaultDataset(datasets.length + 1, kind)
+        const next = defaultDataset(datasets.length + 1, kind, datasets)
         next.points = [point]
         setDatasets((current) => [...current, next])
         activateDataset(next.id)
@@ -1135,6 +1153,7 @@ export default function App() {
     if (pendingTrace && !pendingTrace.ids.includes(id)) return
     setEditingDatasetName(null)
     const remaining = datasets.filter((dataset) => dataset.id !== id)
+    delete pointTrainingBaselines.current[id]
     setDatasets(remaining)
     if (pendingTrace) {
       const ids = pendingTrace.ids.filter((item) => item !== id)
@@ -1367,12 +1386,15 @@ export default function App() {
 
 
   const exportProject = async () => {
-    if (rotationPreview || preprocessing || loading || gridDetecting || exporting) return
+    if (rotationPreview || preprocessing || loading || gridDetecting || exporting || pendingTrace || learningWorking) return
     const snapshot = currentProject()
     for (const { state } of snapshot.charts) {
       for (const url of [state.imageUrl, state.sourceImageUrl]) if (url?.startsWith('blob:')) pinnedUrls.current.add(url)
     }
     setExporting(true)
+    const spacingBaselineIds = Object.keys(pointTrainingBaselines.current)
+    let spacingUpdate: PointSpacingModel | null = null
+    let spacingTargets: number[] = []
     const portable = async (url: string | null) => {
       if (!url?.startsWith('blob:')) return url
       const blob = await fetch(url).then((response) => response.blob())
@@ -1384,6 +1406,17 @@ export default function App() {
       })
     }
     try {
+      if (learningState?.enabled && spacingBaselineIds.length) {
+        const savedDatasets = snapshot.charts.flatMap((chart) => chart.state.datasets)
+        const comparisons = Object.entries(pointTrainingBaselines.current).flatMap(([id, generated]) => {
+          const corrected = savedDatasets.find((dataset) => dataset.id === id)?.points
+          return corrected ? [{ generated, corrected }] : []
+        })
+        if (comparisons.length) {
+          spacingTargets = pointSpacingTargets(comparisons)
+          spacingUpdate = trainPointSpacingModel(pointSpacingModel, comparisons)
+        }
+      }
       const savedCharts = []
       for (const chart of snapshot.charts) {
         const { reconstruction: _reconstruction, ...state } = chart.state
@@ -1393,6 +1426,33 @@ export default function App() {
       }
       const project = { version: 2, name: snapshot.name, activeChartId: snapshot.activeId, charts: savedCharts }
       downloadFile(`${snapshot.name.toLowerCase().replace(/\s+/g, '-') || 'project'}-project.json`, JSON.stringify(project), 'application/json')
+      if (spacingBaselineIds.length && learningState?.enabled) {
+        try {
+          if (spacingUpdate && spacingUpdate.samples > pointSpacingModel.samples) {
+            const store = learningStore.current
+            if (!store) throw new Error('Local learning storage is unavailable.')
+            if (!isDesktop && onlineConfiguration.config) {
+              const target = onlineConfiguration.config.url
+              const samples = spacingTargets.map((spacingTarget) => ({
+                id: crypto.randomUUID(), createdAt: new Date().toISOString(), delta: [],
+                updateId: crypto.randomUUID(), status: 'pending' as const,
+                target, spacingTarget,
+              }))
+              await store.savePointSpacingSamples(samples, spacingUpdate)
+              setPendingUpdates((await store.pendingSamples()).length)
+            } else {
+              await store.savePointSpacingModel(spacingUpdate)
+            }
+            setPointSpacingModel(spacingUpdate)
+            showNotice(!isDesktop && onlineConfiguration.config
+              ? `Queued ${spacingTargets.length} point-spacing update${spacingTargets.length === 1 ? '' : 's'} for Supabase.`
+              : `Saved point-spacing learning from ${spacingTargets.length} edited dataset${spacingTargets.length === 1 ? '' : 's'}.`)
+          }
+          for (const id of spacingBaselineIds) delete pointTrainingBaselines.current[id]
+        } catch (error) {
+          showNotice(error instanceof Error ? `Project saved, but point-spacing learning could not be saved: ${error.message}` : 'Project saved, but point-spacing learning could not be saved.', 'error')
+        }
+      }
     } catch (error) {
       showNotice(error instanceof Error ? error.message : 'Unable to save the project.', 'error')
     } finally {
@@ -1812,16 +1872,15 @@ export default function App() {
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" disabled={Boolean(pendingTrace)} onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
-            {pendingTrace && <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">REVIEW POINTS</span><h2>Check extracted curves</h2></div></div><p className="section-copy">Compare the new points with the image and select datasets to inspect. Confirm before editing, or discard the new datasets to adjust the brush selection.</p>{pendingTrace.warnings.map((warning) => <div className="trace-hint" role="status" key={warning}>{warning}</div>)}<div className="prep-actions"><button className="prep-apply" onClick={() => { activateDataset(pendingTrace.ids.includes(activeId) ? activeId : pendingTrace.ids[0]); setPendingTrace(null); setBrushMarks([]); setBrushErasing(false); setMode('point-edit') }}>Confirm points &amp; modify</button><button className="prep-compare" onClick={() => { setDatasets((current) => current.filter((dataset) => !pendingTrace.ids.includes(dataset.id))); activateDataset(pendingTrace.previousActiveId); setPendingTrace(null); setMode('trace-region') }}>Discard points / adjust brush</button></div></section>}
+            {pendingTrace && <section className="panel-section extraction-section"><div className="section-heading"><div><span className="section-kicker">REVIEW POINTS</span><h2>Check extracted curves</h2></div></div><p className="section-copy">Compare the new points with the image and select datasets to inspect. Confirm before editing, or discard the new datasets to adjust the brush selection.</p>{pendingTrace.warnings.map((warning) => <div className="trace-hint" role="status" key={warning}>{warning}</div>)}<div className="prep-actions"><button className="prep-apply" onClick={() => { for (const id of pendingTrace.ids) pointTrainingBaselines.current[id] = pendingTrace.generated[id]; activateDataset(pendingTrace.ids.includes(activeId) ? activeId : pendingTrace.ids[0]); setPendingTrace(null); setBrushMarks([]); setBrushErasing(false); setMode('point-edit') }}>Confirm points &amp; modify</button><button className="prep-compare" onClick={() => { setDatasets((current) => current.filter((dataset) => !pendingTrace.ids.includes(dataset.id))); activateDataset(pendingTrace.previousActiveId); setPendingTrace(null); setMode('trace-region') }}>Discard points / adjust brush</button></div></section>}
             {mode === 'trace-region' || mode === 'speed' ? <section className="panel-section extraction-section">
               <div className="section-heading"><div><span className="section-kicker">CURVE EXTRACTION</span><h2>{mode === 'trace-region' ? 'Painted curve finder' : 'Automatic curve finder'}</h2></div><ScanSearch size={16} /></div>
               <p className="section-copy">{mode === 'speed' ? <>Click the speed line, or use Paint curve region for a guided trace. Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</> : 'Brush over one or more curves. Erase parts of the selection if needed, then press Auto point.'}</p>
               <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" disabled={mode === 'trace-region' && (showOriginalPreview || !processedImageUrl || Boolean(reconstruction && !needsProcess))} value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
               <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="60" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
-              {mode === 'trace-region' && <label className="range-row"><span>Minimum point distance</span><strong>{minimumSpacing} px</strong><input aria-label="Minimum point distance" type="range" min="0" max="30" value={minimumSpacing} onChange={(event) => setMinimumSpacing(Number(event.target.value))} /></label>}
               <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
               {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div><div className="prep-actions"><button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>Auto point</button><button className="prep-compare" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button></div></>}
-              <div className="trace-hint"><Sparkles size={13} /> Each color is extracted separately, even where brushes overlap. Each connected region should contain one curve. Auto point uses the curve layer when available; inspect crossings, gaps and every result.</div>
+              <div className="trace-hint"><Sparkles size={13} /> Each color is extracted separately, even where brushes overlap. Short spacing anomalies are filtered while sharp bends are retained. Auto point uses the curve layer when available; inspect crossings, gaps and every result. {pointSpacingModel.samples > 0 && `Local edits learned a ${Math.round((pointSpacingModel.factor - 1) * 100)}% sparser sampling step (${learnedSampleStep} px).`}</div>
             </section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
             </>}
@@ -1833,10 +1892,11 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={exportProject}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{isDesktop ? 'Local learning' : 'Shared learning'}</h2></div></div>
-              <p className="section-copy">{isDesktop ? 'Learning stores numeric comparisons locally, not new training images. Images saved by older versions remain until deleted.' : 'Learning sends numeric curve comparisons and model updates to Supabase, not images. Numeric data may reveal information. Anyone with the public key can submit updates.'} Grid edits do not train the model. Review every result; Undo does not undo learning.</p>
+              <p className="section-copy">{isDesktop ? 'Learning stores numeric comparisons locally, not new training images. Images saved by older versions remain until deleted.' : 'Learning sends numeric curve comparisons and model updates to Supabase, not images. Numeric data may reveal information. Anyone with the public key can submit updates.'} Point-spacing comparisons stay on this device; only the numeric spacing target is queued for Supabase when online sync is configured. Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
               {learningError ? <p className="section-copy" role="alert">Storage unavailable: {learningError}. Restart the app to retry.</p> : learningState ? <>
                 <label className="format-control"><span>Enable learning</span><input type="checkbox" disabled={syncing} checked={learningState.enabled} onChange={(event) => { void setLearningEnabled(event.target.checked) }} /></label>
                 <p className="section-copy">Curve model updates: {learningState.model.samples}</p>
+                <p className="section-copy">Point-spacing model updates: {pointSpacingModel.samples}</p>
                 {lastComparison && <p className="section-copy">Last curve comparison: {lastComparison[1]} pixels added, {lastComparison[2]} removed, {lastComparison[3]} retained. Counts use exact pixel overlap.</p>}
                 {!isDesktop && <><p className="section-copy">Pending online updates: {pendingUpdates}{syncing ? ' · Synchronizing…' : ''}</p>
                   {(onlineConfiguration.error || !onlineConfiguration.config) && <p className="section-copy" role="alert">{onlineConfiguration.error ?? 'Supabase is not configured; updates remain on this device.'}</p>}

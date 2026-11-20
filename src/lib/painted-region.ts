@@ -1,4 +1,5 @@
 import { simplifyDetectedTrace } from './digitizer.ts'
+import { removeSpacingOutliers } from './point-spacing.ts'
 import type { PixelPoint } from './digitizer'
 
 export interface BrushMark {
@@ -293,39 +294,10 @@ export function extractBrushCurves(
   return { curves, warnings }
 }
 
-export function minimumPointSpacing(points: PixelPoint[], minimum: number): PixelPoint[] {
-  if (!Number.isFinite(minimum) || minimum < 0) throw new Error('Minimum point spacing must be a non-negative number.')
-  if (!minimum || points.length < 2) return points
-  const first = points[0], last = points[points.length - 1]
-  const keepLast = Math.hypot(last.x - first.x, last.y - first.y) >= minimum
-  const cells = new Map<string, PixelPoint[]>()
-  const kept: PixelPoint[] = []
-  const insert = (point: PixelPoint) => {
-    const x = Math.floor(point.x / minimum), y = Math.floor(point.y / minimum)
-    const key = `${x},${y}`
-    cells.set(key, [...(cells.get(key) ?? []), point])
-  }
-  const isNear = (point: PixelPoint) => {
-    const x = Math.floor(point.x / minimum), y = Math.floor(point.y / minimum)
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-      if (cells.get(`${x + dx},${y + dy}`)?.some((other) => Math.hypot(point.x - other.x, point.y - other.y) < minimum)) return true
-    }
-    return false
-  }
-  kept.push(first); insert(first)
-  if (keepLast) insert(last)
-  for (const point of points.slice(1, keepLast ? -1 : undefined)) {
-    if (!isNear(point)) { kept.push(point); insert(point) }
-  }
-  if (keepLast) kept.push(last)
-  return kept
-}
-
 export function extractBrushGroups(
   image: ImageData,
   groups: { name: string; mask: Uint8ClampedArray }[],
   spacing: number,
-  minimum: number,
   tolerance: number,
   curveColor?: [number, number, number],
   isolatedCurveLayer = false,
@@ -337,7 +309,7 @@ export function extractBrushGroups(
     warnings.push(...result.warnings.map((warning) => `${group.name}: ${warning}`))
     if (!result.curves.length && !result.warnings.length) warnings.push(`${group.name}: The brush selection is empty.`)
     for (const curve of result.curves) {
-      const points = minimumPointSpacing(curve, minimum)
+      const points = removeSpacingOutliers(curve)
       if (curve.length > 1 && points.length < 2) {
         warnings.push(`${group.name}: A curve was shorter than the minimum point spacing and was excluded.`)
       } else {

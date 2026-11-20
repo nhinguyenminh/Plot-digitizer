@@ -19,6 +19,23 @@ export interface Dataset {
   igvUnit?: string
   efficiencyValue?: number
 }
+
+export function datasetColor(index: number) {
+  const hue = ((index - 1) * 137.508 + 165) % 360
+  const saturation = 68
+  const lightness = 52
+  const chroma = (1 - Math.abs(2 * lightness / 100 - 1)) * saturation / 100
+  const section = hue / 60
+  const secondary = chroma * (1 - Math.abs(section % 2 - 1))
+  const [red, green, blue] = section < 1 ? [chroma, secondary, 0]
+    : section < 2 ? [secondary, chroma, 0]
+      : section < 3 ? [0, chroma, secondary]
+        : section < 4 ? [0, secondary, chroma]
+          : section < 5 ? [secondary, 0, chroma]
+            : [chroma, 0, secondary]
+  const match = lightness / 100 - chroma / 2
+  return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, '0')).join('')}`
+}
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
 
 export function calibrationPointsFromGrid(grid: DetectedPlotGrid): { x: CalPoint[]; y: CalPoint[] } {
