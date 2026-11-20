@@ -27,7 +27,12 @@ export function rulerCorrection(start: PixelPoint, end: PixelPoint): number {
   return Math.round((Math.round(angle / 90) * 90 - angle) * 1e10) / 1e10
 }
 
-export function estimateDeskew(data: Uint8ClampedArray, width: number, height: number): number | null {
+export interface AxisAlignmentEstimate {
+  degrees: number
+  axisDifference: number | null
+}
+
+export function estimateAxisAlignment(data: Uint8ClampedArray, width: number, height: number): AxisAlignmentEstimate | null {
   if (width < 32 || height < 32 || data.length !== width * height * 4) return null
   const dark: PixelPoint[] = []
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -38,7 +43,7 @@ export function estimateDeskew(data: Uint8ClampedArray, width: number, height: n
 
   const margin = Math.ceil(Math.hypot(width, height))
   const length = margin * 2 + 1
-  const results: { angle: number; score: number; horizontal: number; vertical: number }[] = []
+  const results: { angle: number; score: number; horizontal: number; vertical: number; horizontalScore: number; verticalScore: number }[] = []
   for (let step = -80; step <= 80; step++) {
     const angle = step / 10
     const radians = angle * Math.PI / 180
@@ -50,7 +55,8 @@ export function estimateDeskew(data: Uint8ClampedArray, width: number, height: n
       rows[Math.round(point.y * cosine - point.x * sine) + margin]++
       columns[Math.round(point.x * cosine + point.y * sine) + margin]++
     }
-    let score = 0
+    let horizontalScore = 0
+    let verticalScore = 0
     let horizontal = 0
     let vertical = 0
     let inHorizontal = false
@@ -64,12 +70,30 @@ export function estimateDeskew(data: Uint8ClampedArray, width: number, height: n
       if (verticalLine && !inVertical) vertical++
       inHorizontal = horizontalLine
       inVertical = verticalLine
-      score += Math.max(0, row - 0.12) ** 2 + Math.max(0, column - 0.12) ** 2
+      horizontalScore += Math.max(0, row - 0.12) ** 2
+      verticalScore += Math.max(0, column - 0.12) ** 2
     }
-    results.push({ angle, score, horizontal, vertical })
+    results.push({ angle, score: horizontalScore + verticalScore, horizontal, vertical, horizontalScore, verticalScore })
   }
   const best = results.reduce((a, b) => b.score > a.score ? b : a)
   const distant = Math.max(...results.filter((result) => Math.abs(result.angle - best.angle) >= 2).map((result) => result.score))
-  if (best.horizontal + best.vertical < 2 || best.score < 0.03 || best.score < distant * 1.15 || Math.abs(best.angle) === 8) return null
-  return -best.angle
+  const axisAngle = (axis: 'horizontal' | 'vertical') => {
+    const key = axis === 'horizontal' ? 'horizontalScore' : 'verticalScore'
+    const peak = results.reduce((a, b) => b[key] > a[key] ? b : a)
+    const other = Math.max(...results.filter((result) => Math.abs(result.angle - peak.angle) >= 2).map((result) => result[key]))
+    return peak[axis] >= 1 && peak[key] >= 0.015 && peak[key] >= other * 1.15 && Math.abs(peak.angle) < 8 ? peak.angle : null
+  }
+  const horizontal = axisAngle('horizontal')
+  const vertical = axisAngle('vertical')
+  const axisDifference = horizontal === null || vertical === null ? null : Math.abs(horizontal - vertical)
+  if (best.horizontal + best.vertical < 2 || best.score < 0.03 || best.score < distant * 1.15 || Math.abs(best.angle) === 8) {
+    return horizontal !== null && axisDifference !== null && axisDifference > 1
+      ? { degrees: -horizontal, axisDifference }
+      : null
+  }
+  return { degrees: -best.angle, axisDifference }
+}
+
+export function estimateDeskew(data: Uint8ClampedArray, width: number, height: number): number | null {
+  return estimateAxisAlignment(data, width, height)?.degrees ?? null
 }

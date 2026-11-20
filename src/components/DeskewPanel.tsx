@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Ruler } from 'lucide-react'
-import { estimateDeskew, rotationGeometry } from '../lib/deskew'
+import { estimateAxisAlignment, rotationGeometry } from '../lib/deskew'
 
 export interface RotationPreview {
   url: string
@@ -70,9 +70,17 @@ export default function DeskewPanel({ imageUrl, disabled, rulerActive, onRuler, 
       if (!context) throw new Error('This browser cannot analyze the image.')
       context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
       context.drawImage(image, 0, 0, canvas.width, canvas.height)
-      const result = estimateDeskew(context.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)
+      const result = estimateAxisAlignment(context.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height)
       if (result === null) setMessage('No reliable grid angle found. Use the ruler or enter an angle.')
-      else { changeAngle(String(result)); setMessage(`Estimated correction: ${result.toFixed(1)}°. Check the main image.`) }
+      else {
+        changeAngle(String(result.degrees))
+        const warning = result.axisDifference === null
+          ? ' Both axis directions could not be verified; inspect the preview.'
+          : result.axisDifference > 1
+            ? ` Axis directions differ by about ${result.axisDifference.toFixed(1)}° from perpendicular; rotation cannot correct perspective.`
+            : ' Check both axes in the preview.'
+        setMessage(`Estimated correction: ${result.degrees.toFixed(1)}°. ${warning}`)
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Could not estimate the image angle.')
     }
@@ -85,7 +93,7 @@ export default function DeskewPanel({ imageUrl, disabled, rulerActive, onRuler, 
         <button type="submit" disabled={disabled || !valid || degrees === 0}>Apply rotation</button>
       </form>
       <button type="button" disabled={disabled || !image} className={rulerActive ? 'active' : ''} aria-pressed={rulerActive} onClick={() => { changeAngle('0'); onRuler() }}><Ruler size={14} /> Straighten ruler</button>
-      <button type="button" disabled={disabled || !image} onClick={estimate}>Estimate angle</button>
+      <button type="button" disabled={disabled || !image} onClick={estimate}>Auto align axes</button>
       {valid && degrees !== 0 && <button type="button" onClick={() => changeAngle('0')}>Cancel rotation</button>}
     </div>
     <small>{!valid ? 'Enter an angle from -180° to 180°.' : message || (rulerActive ? 'Drag the ruler along a horizontal or vertical axis on the image.' : 'Enter an angle and press Enter to apply; positive angles rotate clockwise.')}</small>

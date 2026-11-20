@@ -53,10 +53,9 @@ interface Props {
   onClearGridGuides: () => void
   onClearAxisGuides: () => void
   onRegularGridChange: (enabled: boolean) => void
-  onUndoCorrection: () => void
 }
 
-export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasProcessedImage, showingOriginal, processing, needsProcess, hasRegion, correctionCount, correctionLayer, eraserWidth, drawWidth, snapDrawing, healBrushWidth, healingPreview, healChoice, upscale, customLongEdge, widths, widthsRequireProcess, gridGuides, axisGuides, regularGrid, mode, onProcess, onDeskew, onRotationPreview, rotationPreviewActive, onContinue, onSelectTool, onCorrectionLayerChange, onEraserWidthChange, onDrawWidthChange, onSnapDrawingChange, onHealBrushWidthChange, onHealChoiceChange, onApplyHealing, onDiscardHealing, onUpscaleChange, onCustomLongEdgeChange, onApplyCustomUpscale, onWidthsChange, onClearRegion, onClearGridGuides, onClearAxisGuides, onRegularGridChange, onUndoCorrection }: Props) {
+export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasProcessedImage, showingOriginal, processing, needsProcess, hasRegion, correctionCount, correctionLayer, eraserWidth, drawWidth, snapDrawing, healBrushWidth, healingPreview, healChoice, upscale, customLongEdge, widths, widthsRequireProcess, gridGuides, axisGuides, regularGrid, mode, onProcess, onDeskew, onRotationPreview, rotationPreviewActive, onContinue, onSelectTool, onCorrectionLayerChange, onEraserWidthChange, onDrawWidthChange, onSnapDrawingChange, onHealBrushWidthChange, onHealChoiceChange, onApplyHealing, onDiscardHealing, onUpscaleChange, onCustomLongEdgeChange, onApplyCustomUpscale, onWidthsChange, onClearRegion, onClearGridGuides, onClearAxisGuides, onRegularGridChange }: Props) {
   return <section className="panel-section image-prep-section">
     <div className="section-heading"><div><span className="section-kicker">STEP 01 · FIRST</span><h2>Process image</h2></div><span className="prep-step-icon"><WandSparkles size={14} /></span></div>
     <p className="section-copy">Rebuild lines on a white background, then compare and correct them. This is an experimental detector: check every curve and intersection.</p>
@@ -87,9 +86,6 @@ export default function ImagePreparationPanel({ hasImage, sourceImageUrl, hasPro
         <small>X axis: {axisGuides.horizontal === null ? 'auto' : `${Math.round(axisGuides.horizontal)} px`} · Y axis: {axisGuides.vertical === null ? 'auto' : `${Math.round(axisGuides.vertical)} px`} <button onClick={onClearAxisGuides} disabled={axisGuides.horizontal === null && axisGuides.vertical === null}>Clear axes</button></small>
       </div>
       {hasProcessedImage && <>
-        <div className="prep-actions">
-          <button className="prep-compare" onClick={onUndoCorrection} disabled={!correctionCount}>Undo edit</button>
-        </div>
         <div className="grid-guide-controls layer-selector">
           <span>Editing layer</span>
           <div role="group" aria-label="Fine-tune layer">

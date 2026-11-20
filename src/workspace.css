@@ -8,6 +8,27 @@
   min-height: 0;
 }
 
+.chart-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  flex: none;
+  min-width: 0;
+  padding: 5px 16px 0;
+  background: #101715;
+  border-bottom: 1px solid #293630;
+}
+.chart-tab-list { display: flex; gap: 4px; min-width: 0; overflow-x: auto; }
+.chart-tab-item { display: flex; align-items: center; flex: none; max-width: 240px; border: 1px solid #303d37; border-bottom: 0; border-radius: 6px 6px 0 0; background: #18221e; }
+.chart-tab-item.active { background: #28443a; border-color: #51d6b3; }
+.chart-tab-item button, .chart-add { border: 0; background: transparent; color: #d7e5dc; cursor: pointer; }
+.chart-tab-item button[role=tab] { max-width: 160px; padding: 8px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-tab-action { padding: 5px; display: grid; place-items: center; }
+.chart-tab-item button:disabled, .chart-add:disabled { opacity: .35; cursor: default; }
+.chart-tab-item form { display: flex; align-items: center; padding: 3px; }
+.chart-tab-item input { width: 140px; padding: 4px; border: 1px solid #6cbca0; border-radius: 3px; background: #141917; color: #e7ece9; }
+.chart-add { flex: none; padding: 0 10px; font-size: 20px; }
+
 .left-rail, .right-panel, .center-workspace {
   min-height: 0;
   overflow: hidden;

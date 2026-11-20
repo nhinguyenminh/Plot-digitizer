@@ -1,5 +1,7 @@
 node_modules/
 dist/
+release/
+*.tsbuildinfo
 *.py[cod]
 __pycache__/
 .venv/

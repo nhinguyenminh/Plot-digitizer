@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, Axis3D, Check, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
   Eye, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
   MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
-  Target, Trash2, Upload,
+  Target, Trash2, Undo2, Redo2, Upload,
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
@@ -20,9 +20,21 @@ import { mergeDatasets } from './lib/dataset-merge'
 import { reorderDatasets } from './lib/dataset-order'
 import { drawDatasets } from './lib/dataset-render'
 import { rotationGeometry, rulerCorrection } from './lib/deskew'
-import { createWorkbook } from './lib/excel-export'
+import { createProjectWorkbook } from './lib/excel-export'
+import type { WorkbookChart } from './lib/excel-export'
+import { History } from './lib/history'
+import { initialLearningModel, predictLearningEdits } from './lib/learning'
+import { createLocalLearningStore } from './lib/learning-store'
+import { learningMasksToCorrections } from './lib/learning-edits'
+import { createLearningExample } from './lib/learning-example'
+import { readOnlineLearningConfig, syncOnlineLearning } from './lib/online-learning'
+import type { LearningState, LearningStore } from './lib/learning-store'
 import type { BrushMark } from './lib/painted-region'
 import type { AxisCalibration, CalPoint, Dataset, DatasetKind, PixelPoint, PlotType, ScaleType, ToolMode } from './lib/digitizer'
+
+declare global {
+  interface Window { plotlineDesktop?: boolean }
+}
 
 type Notice = { message: string; type?: 'error' | 'success' }
 type WorkflowStep = 'image' | 'calibration' | 'digitize'
@@ -81,6 +93,63 @@ const modeLabels: Record<ToolMode, string> = {
   'grid-horizontal': 'Guide horizontal grid', 'grid-vertical': 'Guide vertical grid', 'guide-axis-x': 'Set X axis', 'guide-axis-y': 'Set Y axis', crop: 'Crop image',
   'prep-region': 'Select plot area', 'prep-draw': 'Draw', 'prep-line': 'Draw straight line', 'prep-erase': 'Erase', 'prep-heal': 'Heal curve gap', 'prep-straighten': 'Straighten ruler',
 }
+
+interface ChartState {
+  imageName: string
+  imageUrl: string | null
+  sourceImageUrl: string | null
+  processedImageUrl: string | null
+  processedPreviewUrl: string | null
+  upscale: UpscaleSetting
+  gridGuides: GridGuides
+  axisGuides: AxisGuides
+  regularGrid: boolean
+  plotRegion: PlotRegion | null
+  reconstruction: Reconstruction | null
+  corrections: Correction[]
+  reconstructionColors: ReconstructionColors
+  reconstructionWidths: ReconstructionWidths
+  eraserWidth: number
+  drawWidth: number
+  needsProcess: boolean
+  imagePrepared: boolean
+  plotType: PlotType
+  datasets: Dataset[]
+  activeId: string
+  xAxis: AxisCalibration
+  yAxis: AxisCalibration
+  compressorAxes: CompressorAxes
+  calibrationConfirmed: boolean
+  workflowStep: WorkflowStep
+  pointMarkerSize: number
+  fourPointValues: FourPointValues
+  xValue: string
+  yValue: string
+  mode: ToolMode
+}
+
+interface ChartRecord { id: string; name: string; state: ChartState }
+interface ProjectSnapshot { name: string; activeId: string; charts: ChartRecord[] }
+
+const blankChart = (): ChartState => ({
+  imageName: 'Untitled plot', imageUrl: null, sourceImageUrl: null, processedImageUrl: null, processedPreviewUrl: null,
+  upscale: { preset: 'hd', longEdge: 1920 }, gridGuides: { horizontal: [], vertical: [] },
+  axisGuides: { horizontal: null, vertical: null }, regularGrid: true, plotRegion: null,
+  reconstruction: null, corrections: [], reconstructionColors: { curve: '#0066ff', grid: '#000000', axis: '#000000' },
+  reconstructionWidths: { curve: 1, grid: 1 }, eraserWidth: ERASER_WIDTH, drawWidth: 1,
+  needsProcess: true, imagePrepared: false, plotType: 'xy', datasets: [], activeId: '',
+  xAxis: blankAxis(), yAxis: blankAxis(), compressorAxes: defaultCompressorAxes,
+  calibrationConfirmed: false, workflowStep: 'image', pointMarkerSize: 100,
+  fourPointValues: initialFourPointValues, xValue: '0', yValue: '0', mode: 'select',
+})
+
+const sameChartContent = (a: ChartState, b: ChartState) =>
+  (Object.keys(a) as (keyof ChartState)[]).every((key) =>
+    key === 'activeId' || key === 'mode' || a[key] === b[key]
+    || (key === 'datasets' && a.datasets.length === b.datasets.length && a.datasets.every((dataset, index) => dataset === b.datasets[index])))
+const sameProjectContent = (a: ProjectSnapshot, b: ProjectSnapshot) =>
+  a.name === b.name && a.charts.length === b.charts.length && a.charts.every((chart, index) =>
+    chart.id === b.charts[index].id && chart.name === b.charts[index].name && sameChartContent(chart.state, b.charts[index].state))
 
 export default function App() {
   const [imageUrl, setImageUrl] = useState<string | null>(null)
@@ -149,12 +218,109 @@ export default function App() {
   const [activePanel, setActivePanel] = useState<'data' | 'settings'>('data')
   const [showTable, setShowTable] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const isDesktop = window.plotlineDesktop === true
+  const [learningLoading, setLearningLoading] = useState(true)
+  const [learningWorking, setLearningWorking] = useState(false)
+  const [learningState, setLearningState] = useState<LearningState | null>(null)
+  const [learningError, setLearningError] = useState<string | null>(null)
+  const [syncError, setSyncError] = useState<string | null>(null)
+  const [pendingUpdates, setPendingUpdates] = useState(0)
+  const [lastComparison, setLastComparison] = useState<[number, number, number, number] | null>(null)
+  const [syncing, setSyncing] = useState(false)
+  const onlineConfiguration = useMemo(() => {
+    if (isDesktop) return { config: null, error: null }
+    try { return { config: readOnlineLearningConfig(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY), error: null } }
+    catch (error) { return { config: null, error: error instanceof Error ? error.message : 'Invalid Supabase configuration.' } }
+  }, [isDesktop])
+  const [projectName, setProjectName] = useState('Untitled project')
+  const [charts, setCharts] = useState<ChartRecord[]>(() => [{ id: crypto.randomUUID(), name: 'Chart 1', state: blankChart() }])
+  const [activeChartId, setActiveChartId] = useState(() => charts[0].id)
+  const [editingChartName, setEditingChartName] = useState<{ id: string; value: string } | null>(null)
+  const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
   const processingRun = useRef(0)
   const draggedDatasetId = useRef<string | null>(null)
+  const history = useRef<History<ProjectSnapshot> | null>(null)
+  const learningStore = useRef<LearningStore | null>(null)
+  const learningStateRef = useRef<LearningState | null>(null)
+  const learningWorkRef = useRef(false)
+  const syncRef = useRef<Promise<void> | null>(null)
+  const latestProject = useRef<ProjectSnapshot | null>(null)
+  const ownedUrls = useRef(new Set<string>())
+  const pinnedUrls = useRef(new Set<string>())
+  const pointerTransaction = useRef(false)
+  const pointerRecorded = useRef(false)
   const activateDataset = (id: string) => { setActiveId(id); setSelectedDatasetIds(id ? [id] : []); setEditingDatasetName(null) }
+
+  const chartState: ChartState = {
+    imageName, imageUrl, sourceImageUrl, processedImageUrl, processedPreviewUrl, upscale, gridGuides, axisGuides,
+    regularGrid, plotRegion, reconstruction, corrections, reconstructionColors, reconstructionWidths, eraserWidth,
+    drawWidth, needsProcess, imagePrepared, plotType, datasets, activeId, xAxis, yAxis, compressorAxes,
+    calibrationConfirmed, workflowStep, pointMarkerSize, fourPointValues, xValue, yValue, mode,
+  }
+  const currentProject = (): ProjectSnapshot => ({
+    name: projectName, activeId: activeChartId,
+    charts: charts.map((chart) => chart.id === activeChartId ? { ...chart, state: chartState } : chart),
+  })
+
+  const applyChartState = (state: ChartState) => {
+    processingRun.current++
+    setImageName(state.imageName); setImageUrl(state.imageUrl); setSourceImageUrl(state.sourceImageUrl)
+    setProcessedImageUrl(state.processedImageUrl); setProcessedPreviewUrl(state.processedPreviewUrl)
+    setUpscale(state.upscale); setCustomLongEdge(String(state.upscale.longEdge))
+    setGridGuides(state.gridGuides); setAxisGuides(state.axisGuides); setRegularGrid(state.regularGrid)
+    setPlotRegion(state.plotRegion); setReconstruction(state.reconstruction); setCorrections(state.corrections)
+    setReconstructionColors(state.reconstructionColors); setReconstructionWidths(state.reconstructionWidths)
+    setEraserWidth(state.eraserWidth); setDrawWidth(state.drawWidth); setNeedsProcess(state.needsProcess)
+    setImagePrepared(state.imagePrepared); setPlotType(state.plotType); setDatasets(state.datasets)
+    setXAxis(state.xAxis); setYAxis(state.yAxis); setCompressorAxes(state.compressorAxes)
+    setCalibrationConfirmed(state.calibrationConfirmed); setWorkflowStep(state.workflowStep)
+    setPointMarkerSize(state.pointMarkerSize); setBrushMarks([]); setFourPointValues(state.fourPointValues)
+    setXValue(state.xValue); setYValue(state.yValue); setMode(state.mode); activateDataset(state.activeId)
+    setAxisDetection(null); setGridDetection(null); setFourPointPixels([]); setBrushErasing(false)
+    setShowOriginalPreview(false); setShowBackground(true); setRotationPreview(null)
+    setPointSelectionVersion((version) => version + 1)
+  }
+
+  const applyProject = (snapshot: ProjectSnapshot) => {
+    const active = snapshot.charts.find((chart) => chart.id === snapshot.activeId)
+    if (!active) throw new Error('The active chart was not found.')
+    setProjectName(snapshot.name); setCharts(snapshot.charts); setActiveChartId(snapshot.activeId)
+    setEditingChartName(null); setPendingTrace(null); applyChartState(active.state)
+  }
+
+  useLayoutEffect(() => {
+    const snapshot = currentProject()
+    latestProject.current = snapshot
+    if (pendingTrace || learningWorking) return
+    if (!history.current) history.current = new History(snapshot)
+    else if (!sameProjectContent(history.current.current, snapshot)) {
+      history.current.record(snapshot, pointerTransaction.current && pointerRecorded.current)
+      if (pointerTransaction.current) pointerRecorded.current = true
+    } else history.current.replace({ ...snapshot, activeId: history.current.current.activeId })
+    const available = { undo: history.current.canUndo, redo: history.current.canRedo }
+    setHistoryAvailability((previous) => previous.undo === available.undo && previous.redo === available.redo ? previous : available)
+    const referenced = new Set(history.current.snapshots.flatMap((entry) => entry.charts.flatMap(({ state }) => [state.imageUrl, state.sourceImageUrl])))
+    for (const url of pinnedUrls.current) referenced.add(url)
+    for (const url of ownedUrls.current) {
+      if (!referenced.has(url)) { URL.revokeObjectURL(url); ownedUrls.current.delete(url) }
+    }
+  })
+
+  useEffect(() => {
+    const urls = ownedUrls.current
+    return () => { for (const url of urls) URL.revokeObjectURL(url); urls.clear() }
+  }, [])
+
+  useEffect(() => {
+    const finish = () => { pointerTransaction.current = false; pointerRecorded.current = false }
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+    return () => { window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish) }
+  }, [])
 
   useEffect(() => { setBrushMarks([]) }, [imageUrl, sourceImageUrl])
   useEffect(() => { setRotationPreview(null) }, [sourceImageUrl])
@@ -172,7 +338,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [workflowStep, pendingTrace])
+  }, [workflowStep, pendingTrace, learningWorking])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
   const showGuides = needsProcess || mode === 'grid-horizontal' || mode === 'grid-vertical' || mode === 'guide-axis-x' || mode === 'guide-axis-y' || mode === 'prep-region'
@@ -190,15 +356,119 @@ export default function App() {
     window.setTimeout(() => setNotice(null), 3400)
   }
 
+  useEffect(() => {
+    let active = true
+    if (!learningStore.current) learningStore.current = createLocalLearningStore()
+    Promise.all([learningStore.current.load(), learningStore.current.pendingSamples()]).then(([state, pending]) => {
+      if (active) { learningStateRef.current = state; setLearningState(state); setPendingUpdates(pending.length); setLearningError(null) }
+    }).catch((error: unknown) => {
+      if (active) {
+        const message = error instanceof Error ? error.message : 'Could not load local learning data.'
+        setLearningError(message); showNotice(message, 'error')
+      }
+    }).finally(() => { if (active) setLearningLoading(false) })
+    return () => { active = false }
+  }, [isDesktop])
+
+  const synchronizeLearning = () => {
+    const config = onlineConfiguration.config
+    const store = learningStore.current
+    if (isDesktop || !config || !store || !learningStateRef.current?.enabled || learningWorkRef.current || syncRef.current) return
+    setSyncing(true)
+    const operation = syncOnlineLearning(store, config).then(({ model, pending }) => {
+      const current = learningStateRef.current
+      if (current) { const state = { ...current, model }; learningStateRef.current = state; setLearningState(state) }
+      setPendingUpdates(pending); setSyncError(null)
+    }).catch(async (error: unknown) => {
+      setSyncError(error instanceof Error ? error.message : 'Could not synchronize learning updates.')
+      try { setPendingUpdates((await store.pendingSamples()).length) }
+      catch (storageError) { setLearningError(storageError instanceof Error ? storageError.message : 'Could not read the learning queue.') }
+    }).finally(() => { syncRef.current = null; setSyncing(false) })
+    syncRef.current = operation
+  }
+
+  useEffect(() => {
+    if (isDesktop || !learningState?.enabled || !onlineConfiguration.config) return
+    synchronizeLearning()
+    const timer = window.setInterval(synchronizeLearning, 30000)
+    window.addEventListener('online', synchronizeLearning)
+    return () => { window.clearInterval(timer); window.removeEventListener('online', synchronizeLearning) }
+  }, [isDesktop, learningState?.enabled, onlineConfiguration.config, pendingUpdates])
+
+  const projectBusy = Boolean(pendingTrace || rotationPreview || preprocessing || loading || gridDetecting || exporting || learningLoading || learningWorking)
+  const changeHistory = (direction: 'undo' | 'redo') => {
+    if (projectBusy || !history.current) return
+    const snapshot = direction === 'undo' ? history.current.undo() : history.current.redo()
+    if (!snapshot) return
+    pointerTransaction.current = false; pointerRecorded.current = false
+    applyProject(snapshot)
+    setHistoryAvailability({ undo: history.current.canUndo, redo: history.current.canRedo })
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && target.isContentEditable)) return
+      const key = event.key.toLowerCase()
+      if (key !== 'z' && key !== 'y') return
+      event.preventDefault()
+      changeHistory(key === 'y' || event.shiftKey ? 'redo' : 'undo')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
+
+  const switchChart = (id: string) => {
+    if (projectBusy || id === activeChartId) return
+    const snapshot = currentProject()
+    const target = snapshot.charts.find((chart) => chart.id === id)
+    if (!target) return
+    setCharts(snapshot.charts); setActiveChartId(id); setEditingChartName(null)
+    applyChartState(target.state)
+  }
+
+  const addChart = () => {
+    if (projectBusy) return
+    const snapshot = currentProject()
+    let number = snapshot.charts.length + 1
+    while (snapshot.charts.some((chart) => chart.name.toLowerCase() === `chart ${number}`)) number++
+    const next = { id: crypto.randomUUID(), name: `Chart ${number}`, state: blankChart() }
+    setCharts([...snapshot.charts, next]); setActiveChartId(next.id); setEditingChartName(null)
+    applyChartState(next.state)
+  }
+
+  const deleteChart = (id: string) => {
+    if (projectBusy || charts.length < 2) return
+    const snapshot = currentProject()
+    const chart = snapshot.charts.find((item) => item.id === id)
+    if (!chart || !window.confirm(`Delete chart "${chart.name}" and its data? You can undo this action.`)) return
+    const remaining = snapshot.charts.filter((item) => item.id !== id)
+    setCharts(remaining); setEditingChartName(null)
+    if (id === activeChartId) {
+      const next = remaining[Math.min(snapshot.charts.findIndex((item) => item.id === id), remaining.length - 1)]
+      setActiveChartId(next.id); applyChartState(next.state)
+    }
+  }
+
+  const saveChartName = () => {
+    if (!editingChartName) return
+    const name = editingChartName.value.trim()
+    if (!name) { showNotice('Chart name cannot be empty.', 'error'); return }
+    setCharts((current) => current.map((chart) => chart.id === editingChartName.id ? { ...chart, name } : chart))
+    setEditingChartName(null)
+  }
+
   const openImage = (file?: File) => {
-    if (!file) return
+    if (!file || learningWorking) return
     if (pendingTrace) { showNotice('Confirm or discard the new points before replacing the image.', 'error'); return }
     if (!file.type.startsWith('image/')) { showNotice('Choose a supported image file.', 'error'); return }
     if (file.size > 35 * 1024 * 1024) { showNotice('Images must be smaller than 35 MB.', 'error'); return }
     processingRun.current++; setPreprocessing(false)
     const nextUrl = URL.createObjectURL(file)
-    setImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
-    setSourceImageUrl((previous) => { if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous); return nextUrl })
+    ownedUrls.current.add(nextUrl)
+    setImageUrl(nextUrl); setSourceImageUrl(nextUrl)
     setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false); setShowBackground(true); setImagePrepared(false); setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] })
     setPlotRegion(null); setAxisGuides({ horizontal: null, vertical: null }); setRegularGrid(true); setReconstruction(null); setCorrections([]); setNeedsProcess(true)
     setImageName(file.name.replace(/\.[^.]+$/, '') || 'Untitled plot')
@@ -224,18 +494,36 @@ export default function App() {
   }, [])
 
   const processImage = async () => {
-    if (!sourceImageUrl || preprocessing) return
+    if (!sourceImageUrl || preprocessing || learningWorking) return
     const run = ++processingRun.current
     setPreprocessing(true)
     try {
       const result = await reconstructImage(sourceImageUrl, plotRegion, gridGuides, corrections, reconstructionColors, reconstructionWidths, { regularGrid, axisGuides })
       if (run !== processingRun.current) return
-      const preview = renderUpscaled(result.geometry, corrections, reconstructionColors, reconstructionWidths, upscale, result.dataUrl)
-      setImageUrl(result.dataUrl); setProcessedImageUrl(result.dataUrl); setShowOriginalPreview(false)
+      let output = result.dataUrl
+      let warning: string | null = null
+      if (learningState?.enabled && learningState.model.samples > 0) {
+        try {
+          const layer = renderReconstructionCurveLayer(result.geometry, [], reconstructionWidths)
+          const context = layer.getContext('2d', { willReadFrequently: true })
+          if (!context) throw new Error('Could not read the automatic curve layer.')
+          const prediction = predictLearningEdits(learningState.model, {
+            width: layer.width, height: layer.height, source: result.sourcePixels.data,
+            automatic: context.getImageData(0, 0, layer.width, layer.height).data, region: result.geometry.region,
+          })
+          result.geometry.learnedCorrections = learningMasksToCorrections(prediction.add, prediction.erase, layer.width, layer.height)
+          output = renderReconstruction(result.geometry, corrections, reconstructionColors, reconstructionWidths)
+        } catch (error) {
+          result.geometry.learnedCorrections = []
+          warning = error instanceof Error ? error.message : 'Local prediction failed; the automatic result was kept.'
+        }
+      }
+      const preview = renderUpscaled(result.geometry, corrections, reconstructionColors, reconstructionWidths, upscale, output)
+      setImageUrl(output); setProcessedImageUrl(output); setShowOriginalPreview(false)
       setProcessedPreviewUrl(preview)
       setReconstruction(result.geometry); setNeedsProcess(false); setShowBackground(true)
       setAxisDetection(null); setGridDetection(null); setCalibrationConfirmed(false); setImagePrepared(false); setMode('select')
-      showNotice(`Rebuilt ${result.geometry.horizontal.length} horizontal and ${result.geometry.vertical.length} vertical lines and ${result.geometry.curves.length} curve fragments. Inspect the result against the original.`)
+      showNotice(warning ?? `Rebuilt ${result.geometry.horizontal.length} horizontal and ${result.geometry.vertical.length} vertical lines and ${result.geometry.curves.length} curve fragments. Inspect the result against the original.`, warning ? 'error' : 'success')
     } catch (error) { if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'The image could not be processed in this browser.', 'error') }
     finally { if (run === processingRun.current) setPreprocessing(false) }
   }
@@ -275,7 +563,7 @@ export default function App() {
   const applyHealing = () => {
     if (healPreview && updateCorrections([...corrections, { points: healPreview, erase: false, layer: 'curve', width: drawWidth }])) {
       setHealMark(null); setHealOptions([]); setShowOriginalPreview(false)
-      showNotice('Connection applied. Inspect it against the original; use Undo edit if needed.')
+      showNotice('Connection applied. Inspect it against the original; use Undo if needed.')
     }
   }
 
@@ -302,18 +590,81 @@ export default function App() {
     setReconstructionColors(colors); setReconstructionWidths(widths)
   }
 
-  const confirmPreparedImage = () => {
+  const confirmPreparedImage = async () => {
+    if (learningWorking || learningWorkRef.current || preprocessing) return
+    if (learningState?.enabled && reconstruction && sourceImageUrl && corrections.length && !needsProcess) {
+      const store = learningStore.current
+      if (!store) { showNotice('Local learning storage is unavailable.', 'error'); return }
+      learningWorkRef.current = true
+      setLearningWorking(true)
+      showNotice('Saving the numeric learning update…')
+      try {
+        if (syncRef.current) await syncRef.current
+        const state = learningStateRef.current
+        if (!state?.enabled) throw new Error('Learning is disabled.')
+        const example = await createLearningExample(sourceImageUrl, reconstruction, corrections, reconstructionWidths, state.model)
+        if (!(await store.hasSample(example.sample.id))) {
+          if (!isDesktop && example.updated) {
+            example.sample.updateId = crypto.randomUUID(); example.sample.status = 'pending'
+            example.sample.target = onlineConfiguration.config?.url
+          }
+          await store.saveSample(example.sample, example.model)
+          const nextState = { ...state, model: example.model }
+          learningStateRef.current = nextState; setLearningState(nextState)
+          if (!isDesktop && example.updated) setPendingUpdates((await store.pendingSamples()).length)
+          showNotice(example.updated ? isDesktop ? 'Image confirmed and local curve model updated.' : 'Image confirmed; numeric update saved for synchronization.' : 'Image confirmed. No curve edits were available to update the model.')
+        } else showNotice('Image confirmed. This learning sample was already saved.')
+        if (example.sample.comparison) setLastComparison(example.sample.comparison.counts)
+      } catch (error) {
+        showNotice(error instanceof Error ? `Local learning failed: ${error.message}` : 'Local learning failed. Retry or disable learning before confirming.', 'error')
+        return
+      } finally { learningWorkRef.current = false; setLearningWorking(false) }
+    } else if (learningError) {
+      showNotice(`Image confirmed, but learning storage is unavailable: ${learningError}`, 'error')
+    } else {
+      showNotice('Image confirmed. Continue by calibrating the axes.')
+    }
     if (showOriginalPreview && processedImageUrl) setShowOriginalPreview(false)
     setImagePrepared(true)
     setWorkflowStep('calibration')
     setMode('calibrate-x')
-    showNotice('Image confirmed. Continue by calibrating the axes.')
+  }
+
+  const setLearningEnabled = async (enabled: boolean) => {
+    if (!learningStore.current || !learningState || learningWorking || syncing) return
+    learningWorkRef.current = true
+    setLearningWorking(true)
+    try {
+      await learningStore.current.setEnabled(enabled)
+      const nextState = { ...learningState, enabled }
+      learningStateRef.current = nextState; setLearningState(nextState)
+      showNotice(enabled ? 'Learning enabled.' : 'Learning disabled. Existing data was kept.')
+    } catch (error) {
+      showNotice(error instanceof Error ? `Could not change local learning: ${error.message}` : 'Could not change local learning.', 'error')
+    } finally { learningWorkRef.current = false; setLearningWorking(false) }
+  }
+
+  const clearLearning = async () => {
+    if (!learningStore.current || !learningState || learningWorking || syncing) return
+    if (!window.confirm('Delete all local learning data, including any older saved images and pending updates? Shared online updates cannot be deleted here.')) return
+    learningWorkRef.current = true
+    setLearningWorking(true)
+    try {
+      await learningStore.current.clear()
+      const nextState = { ...learningState, model: initialLearningModel() }
+      learningStateRef.current = nextState; setLearningState(nextState); setPendingUpdates(0); setLastComparison(null)
+      showNotice('Local learning data deleted.')
+    } catch (error) {
+      showNotice(error instanceof Error ? `Could not delete local learning data: ${error.message}` : 'Could not delete local learning data.', 'error')
+    } finally { learningWorkRef.current = false; setLearningWorking(false) }
   }
 
   const detectAxes = async () => {
     if (!imageUrl) return
+    const run = processingRun.current
     try {
       const detected = await detectPlotAxes(imageUrl)
+      if (run !== processingRun.current) return
       if (!detected) { showNotice('Could not confidently find the bottom and left axes. Try cropping the chart or adjust the scan first.', 'error'); return }
       setAxisDetection(detected)
       const origin: CalPoint = { ...detected.intersection, value: xAxis.scale === 'date' ? Date.parse(xValue) : Number(xValue) }
@@ -323,14 +674,16 @@ export default function App() {
       setYAxis((current) => ({ ...current, points: [yOrigin, ...current.points.slice(1)] }))
       setMode('calibrate-x')
       showNotice('Axes located near the lower and left edges. Their intersection was added as the first X/Y calibration point; verify it against the chart.')
-    } catch { showNotice('Axis detection failed while reading this image.', 'error') }
+    } catch { if (run === processingRun.current) showNotice('Axis detection failed while reading this image.', 'error') }
   }
 
   const calibrateFromDetectedGrid = async () => {
     if (!imageUrl) return
+    const run = processingRun.current
     setGridDetecting(true)
     try {
       const detected = await detectPlotGrid(imageUrl)
+      if (run !== processingRun.current) return
       if (!detected) {
         setGridDetection(null)
         showNotice('Could not find at least two clear horizontal and vertical grid lines. Try cleaning or cropping the image.', 'error')
@@ -372,7 +725,7 @@ export default function App() {
       setMode('calibrate-edit')
       showNotice(`Detected ${detected.verticalLines.length} vertical and ${detected.horizontalLines.length} horizontal grid lines. Check the highlighted calibration points and adjust them if needed.`)
     } catch {
-      showNotice('Grid detection failed while reading this image.', 'error')
+      if (run === processingRun.current) showNotice('Grid detection failed while reading this image.', 'error')
     } finally {
       setGridDetecting(false)
     }
@@ -473,11 +826,13 @@ export default function App() {
     const traceImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
     if (!traceImageUrl || !imagePrepared) return
     const traceMode = mode
+    const run = processingRun.current
     setLoading(true)
     try {
       const image = new Image()
       image.src = traceImageUrl
       await image.decode()
+      if (run !== processingRun.current) return
       const canvas = document.createElement('canvas')
       canvas.width = image.naturalWidth
       canvas.height = image.naturalHeight
@@ -542,7 +897,7 @@ export default function App() {
         ? `Created a ${traced.length}-point candidate. Compare it with the original before deleting either dataset.`
         : `Found ${traced.length} curve points. Select a point to fine-tune its position.`)
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
+      if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
     } finally {
       setLoading(false)
     }
@@ -601,11 +956,13 @@ export default function App() {
   const autoPaintedPoints = async () => {
     const traceImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
     if (!traceImageUrl || !imagePrepared || !brushMarks.length || loading) return
+    const run = processingRun.current
     setLoading(true)
     try {
       const image = new Image()
       image.src = traceImageUrl
       await image.decode()
+      if (run !== processingRun.current) return
       if (image.naturalWidth * image.naturalHeight > 4_000_000) throw new Error('Use an image below 4 megapixels for automatic point extraction.')
       const isolatedCurveLayer = !showOriginalPreview && processedImageUrl && reconstruction && !needsProcess
         ? renderReconstructionCurveLayer(reconstruction, corrections, reconstructionWidths)
@@ -662,7 +1019,7 @@ export default function App() {
       setMode('select')
       showNotice(`Created ${next.length} curve${next.length === 1 ? '' : 's'}.${excluded ? ` ${excluded} removed by boundaries.` : ''} Review before confirming.`)
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
+      if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
     } finally {
       setLoading(false)
     }
@@ -837,14 +1194,20 @@ export default function App() {
   const cropImage = async (rect: { x: number; y: number; width: number; height: number }) => {
     if (!imageUrl || preprocessing) return
     if (processedImageUrl && !window.confirm('Cropping clears the reconstruction and its edits. Crop the original image instead?')) { setMode('select'); return }
-    const image = new Image(); image.src = sourceImageUrl ?? imageUrl; await image.decode()
+    const run = processingRun.current
+    const image = new Image(); image.src = sourceImageUrl ?? imageUrl
+    try { await image.decode() }
+    catch { if (run === processingRun.current) showNotice('Could not load the image for cropping.', 'error'); return }
+    if (run !== processingRun.current) return
     const x = Math.max(0, Math.round(rect.x))
     const y = Math.max(0, Math.round(rect.y))
     const width = Math.min(image.naturalWidth - x, Math.round(rect.width))
     const height = Math.min(image.naturalHeight - y, Math.round(rect.height))
     if (width < 10 || height < 10) { showNotice('Select a larger crop area.', 'error'); return }
     const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height
-    canvas.getContext('2d')!.drawImage(image, x, y, width, height, 0, 0, width, height)
+    const context = canvas.getContext('2d')
+    if (!context) { showNotice('This browser cannot crop the image.', 'error'); return }
+    context.drawImage(image, x, y, width, height, 0, 0, width, height)
     const shiftPoint = (point: PixelPoint): PixelPoint => ({ x: point.x - x, y: point.y - y })
     setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map(shiftPoint) })))
     setXAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
@@ -858,12 +1221,17 @@ export default function App() {
   const applyImageTransform = async (operation: 'rotate-left' | 'rotate-right' | 'flip-x' | 'flip-y') => {
     if (!imageUrl || preprocessing) return
     if (processedImageUrl && !window.confirm('Transforming clears the reconstruction and its edits. Transform the original image instead?')) return
-    const image = new Image(); image.src = sourceImageUrl ?? imageUrl; await image.decode()
+    const run = processingRun.current
+    const image = new Image(); image.src = sourceImageUrl ?? imageUrl
+    try { await image.decode() }
+    catch { if (run === processingRun.current) showNotice('Could not load the image for transformation.', 'error'); return }
+    if (run !== processingRun.current) return
     const canvas = document.createElement('canvas')
     const rotate = operation === 'rotate-left' || operation === 'rotate-right'
     canvas.width = rotate ? image.naturalHeight : image.naturalWidth
     canvas.height = rotate ? image.naturalWidth : image.naturalHeight
-    const context = canvas.getContext('2d')!
+    const context = canvas.getContext('2d')
+    if (!context) { showNotice('This browser cannot transform the image.', 'error'); return }
     context.translate(canvas.width / 2, canvas.height / 2)
     if (operation === 'rotate-left') context.rotate(-Math.PI / 2)
     if (operation === 'rotate-right') context.rotate(Math.PI / 2)
@@ -923,11 +1291,13 @@ export default function App() {
     catch (error) { showNotice(error instanceof Error ? error.message : 'Could not straighten the image.', 'error') }
   }
 
-  const getExportPoints = (dataset: Dataset) => dataset.points
-    .map((point) => calibrated ? pointToData(point, xAxis, yAxis) : { x: point.x, y: point.y })
+  const getChartExportPoints = (dataset: Dataset, state: ChartState) => dataset.points
+    .map((point) => state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2 ? pointToData(point, state.xAxis, state.yAxis) : { x: point.x, y: point.y })
     .filter((point): point is { x: number; y: number } => point !== null)
     .sort((a, b) => sortBy === 'x' ? a.x - b.x : a.y - b.y)
     .map((point) => ({ x: Number(point.x.toPrecision(precision)), y: Number(point.y.toPrecision(precision)) }))
+
+  const getExportPoints = (dataset: Dataset) => getChartExportPoints(dataset, chartState)
 
   const exportDataset = (dataset: Dataset, format: 'csv' | 'json') => {
     const points = getExportPoints(dataset)
@@ -990,30 +1360,53 @@ export default function App() {
   }
 
   const exportExcel = async () => {
-    if (!sourceImageUrl || pendingTrace) return
+    if (projectBusy) return
+    const snapshot = currentProject()
+    for (const { state } of snapshot.charts) if (state.sourceImageUrl?.startsWith('blob:')) pinnedUrls.current.add(state.sourceImageUrl)
+    setExporting(true)
     try {
-      const image = new Image(); image.src = sourceImageUrl; await image.decode()
-      const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight
-      const context = canvas.getContext('2d')
-      if (!context) throw new Error('This browser cannot draw the plot for Excel.')
-      context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
-      context.drawImage(image, 0, 0)
-      drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100)
-      const xLabel = calibrated ? plotType === 'compressor' ? axisName(compressorAxes.x) : 'X' : 'Pixel X'
-      const yLabel = calibrated ? plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y' : 'Pixel Y'
-      const workbook = await createWorkbook(datasets.map((dataset) => ({ dataset, points: getExportPoints(dataset) })), xLabel, yLabel, {
-        base64: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height,
-      })
+      const output: WorkbookChart[] = []
+      for (const chart of snapshot.charts) {
+        const state = chart.state
+        let overlay: WorkbookChart['image'] = null
+        if (state.sourceImageUrl) {
+          const image = new Image(); image.src = state.sourceImageUrl; await image.decode()
+          const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight
+          const context = canvas.getContext('2d')
+          if (!context) throw new Error('This browser cannot draw the plot for Excel.')
+          context.fillStyle = '#ffffff'; context.fillRect(0, 0, canvas.width, canvas.height)
+          context.drawImage(image, 0, 0)
+          drawDatasets(context, state.datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * state.pointMarkerSize / 100)
+          overlay = { base64: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }
+        }
+        const isCalibrated = state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2
+        output.push({
+          name: chart.name,
+          datasets: state.datasets.map((dataset) => ({ dataset, points: getChartExportPoints(dataset, state) })),
+          xLabel: isCalibrated ? state.plotType === 'compressor' ? axisName(state.compressorAxes.x) : 'X' : 'Pixel X',
+          yLabel: isCalibrated ? state.plotType === 'compressor' ? axisName(state.compressorAxes.y) : 'Y' : 'Pixel Y',
+          image: overlay,
+        })
+      }
+      const workbook = await createProjectWorkbook(output)
       const buffer = await workbook.xlsx.writeBuffer()
       const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-      downloadFile(`${imageName || 'plot'}-data.xlsx`, blob)
+      downloadFile(`${snapshot.name || 'project'}-data.xlsx`, blob)
     } catch (error) {
       showNotice(error instanceof Error ? error.message : 'Could not export the Excel workbook.', 'error')
+    } finally {
+      pinnedUrls.current.clear(); setExporting(false)
     }
   }
 
 
   const exportProject = async () => {
+    if (rotationPreview || preprocessing || loading || gridDetecting || exporting) return
+    const snapshot = currentProject()
+    for (const { state } of snapshot.charts) {
+      for (const url of [state.imageUrl, state.sourceImageUrl]) if (url?.startsWith('blob:')) pinnedUrls.current.add(url)
+    }
+    setExporting(true)
     const portable = async (url: string | null) => {
       if (!url?.startsWith('blob:')) return url
       const blob = await fetch(url).then((response) => response.blob())
@@ -1025,22 +1418,57 @@ export default function App() {
       })
     }
     try {
-      const project = { version: 1, imageName, imageUrl: await portable(imageUrl), sourceImageUrl: await portable(sourceImageUrl),
-        processedImageUrl, processedPreviewUrl, upscale, plotRegion, gridGuides, axisGuides, regularGrid, corrections, eraserWidth, drawWidth, reconstructionColors, reconstructionWidths, pointMarkerSize, imagePrepared, calibrationConfirmed, workflowStep, plotType, xAxis, yAxis, datasets, compressorAxes }
-      downloadFile(`${imageName.toLowerCase().replace(/\\s+/g, '-') || 'plot'}-project.json`, JSON.stringify(project), 'application/json')
+      const savedCharts = []
+      for (const chart of snapshot.charts) {
+        const { reconstruction: _reconstruction, ...state } = chart.state
+        savedCharts.push({ id: chart.id, name: chart.name, state: {
+          ...state, imageUrl: await portable(state.imageUrl), sourceImageUrl: await portable(state.sourceImageUrl),
+        } })
+      }
+      const project = { version: 2, name: snapshot.name, activeChartId: snapshot.activeId, charts: savedCharts }
+      downloadFile(`${snapshot.name.toLowerCase().replace(/\s+/g, '-') || 'project'}-project.json`, JSON.stringify(project), 'application/json')
     } catch (error) {
       showNotice(error instanceof Error ? error.message : 'Unable to save the project.', 'error')
+    } finally {
+      pinnedUrls.current.clear(); setExporting(false)
     }
   }
 
 
   const importProject = async (file?: File) => {
-    if (!file) return
+    if (!file || projectBusy) return
+    const run = ++processingRun.current
+    const before = currentProject()
     try {
-      const project = JSON.parse(await file.text())
-      if (project.version !== 1 || !Array.isArray(project.datasets)) throw new Error('Unsupported project file')
+      const fileData = JSON.parse(await file.text())
+      if (run !== processingRun.current) return
+      if (latestProject.current && !sameProjectContent(before, latestProject.current)) {
+        showNotice('The project changed while the file was opening. Please open it again.', 'error')
+        return
+      }
+      const parseChart = (project: typeof fileData): ChartState => {
+      if (!project || !Array.isArray(project.datasets)) throw new Error('Invalid chart data')
       const validPoint = (value: PixelPoint) => value && Number.isFinite(value.x) && Number.isFinite(value.y)
       const validEraserWidth = (value: number) => Number.isFinite(value) && value >= ERASER_MIN_WIDTH && value <= ERASER_MAX_WIDTH
+      if (!project.datasets.every((dataset: Dataset) => dataset && typeof dataset.id === 'string' && typeof dataset.name === 'string'
+        && typeof dataset.color === 'string' && /^#[0-9a-f]{6}$/i.test(dataset.color) && Array.isArray(dataset.points) && dataset.points.every(validPoint)
+        && ['curve', 'surge', 'choke', 'speed', 'efficiency', 'measurement'].includes(dataset.kind))) throw new Error('Invalid datasets')
+      if (project.datasets.some((dataset: Dataset) => !dataset.id) || new Set(project.datasets.map((dataset: Dataset) => dataset.id)).size !== project.datasets.length) throw new Error('Invalid dataset ids')
+      for (const axis of [project.xAxis, project.yAxis]) {
+        if (axis && (!Array.isArray(axis.points) || !axis.points.every((point: CalPoint) => validPoint(point) && Number.isFinite(point.value))
+          || !['linear', 'log', 'inverse', 'date'].includes(axis.scale))) throw new Error('Invalid calibration')
+      }
+      if (project.plotType && !plotOptions.some((option) => option.id === project.plotType)) throw new Error('Invalid plot type')
+      if (project.imagePrepared !== undefined && typeof project.imagePrepared !== 'boolean') throw new Error('Invalid image confirmation')
+      if (project.fourPointValues && !['x1', 'x2', 'y1', 'y2'].every((key) => typeof project.fourPointValues[key] === 'string')) throw new Error('Invalid calibration inputs')
+      if (project.compressorAxes && !['x', 'y'].every((key) => {
+        const axis = project.compressorAxes[key]
+        return axis && typeof axis.label === 'string' && typeof axis.unit === 'string'
+          && Object.hasOwn(compressorAxisLabels, axis.variable)
+      })) throw new Error('Invalid compressor axes')
+      for (const key of ['imageUrl', 'sourceImageUrl', 'processedImageUrl', 'processedPreviewUrl']) {
+        if (project[key] != null && typeof project[key] !== 'string') throw new Error('Invalid image')
+      }
       if (project.plotRegion && ![project.plotRegion.x, project.plotRegion.y, project.plotRegion.width, project.plotRegion.height].every(Number.isFinite)) throw new Error('Invalid plot region')
       if (project.gridGuides && (!Array.isArray(project.gridGuides.horizontal) || !Array.isArray(project.gridGuides.vertical)
         || !project.gridGuides.horizontal.every(Number.isFinite) || !project.gridGuides.vertical.every(Number.isFinite))) throw new Error('Invalid grid guides')
@@ -1058,27 +1486,50 @@ export default function App() {
         typeof project.reconstructionColors[key] === 'string' && /^#[0-9a-f]{6}$/i.test(project.reconstructionColors[key]))) throw new Error('Invalid reconstruction colors')
       if (project.reconstructionWidths && !['curve', 'grid'].every((key) =>
         Number.isFinite(project.reconstructionWidths[key]) && project.reconstructionWidths[key] >= 0.5 && project.reconstructionWidths[key] <= 8)) throw new Error('Invalid reconstruction widths')
-      processingRun.current++; setPreprocessing(false)
-      setImageName(project.imageName || 'Imported plot'); setImageUrl(project.imageUrl || null); setSourceImageUrl(project.sourceImageUrl || project.imageUrl || null)
-      setProcessedImageUrl(project.processedImageUrl || null); setProcessedPreviewUrl(project.processedPreviewUrl || null); setShowOriginalPreview(false); setShowBackground(true)
-      setUpscale(project.upscale ?? { preset: 'hd', longEdge: 1920 }); setCustomLongEdge(String(project.upscale?.longEdge ?? 1920))
-      setImagePrepared(project.imagePrepared ?? Boolean(project.imageUrl)); setAxisDetection(null); setGridDetection(null)
-      setGridGuides(project.gridGuides || { horizontal: [], vertical: [] }); setPlotRegion(project.plotRegion || null); setCorrections(project.corrections || [])
-      setAxisGuides(project.axisGuides || { horizontal: null, vertical: null }); setRegularGrid(project.regularGrid ?? false)
-      setReconstructionColors(project.reconstructionColors || { curve: '#000000', grid: '#000000', axis: '#000000' })
-      setReconstructionWidths(project.reconstructionWidths || { curve: 1, grid: 1 })
-      setEraserWidth(project.eraserWidth ?? ERASER_WIDTH)
-      setDrawWidth(project.drawWidth ?? 1)
-      setPointMarkerSize(project.pointMarkerSize ?? 100)
-      setReconstruction(null); setNeedsProcess(true); setPlotType(project.plotType || 'xy'); setFourPointPixels([]); setCompressorAxes(project.compressorAxes || defaultCompressorAxes)
-      setXAxis(project.xAxis || blankAxis()); setYAxis(project.yAxis || blankAxis()); setDatasets(project.datasets)
       const hasCalibration = (project.xAxis?.points?.length ?? 0) >= 2 && (project.yAxis?.points?.length ?? 0) >= 2
       const prepared = project.imagePrepared ?? Boolean(project.imageUrl)
       const confirmed = hasCalibration && (project.calibrationConfirmed ?? true)
       const step: WorkflowStep = !prepared ? 'image' : project.workflowStep === 'image' ? 'image' : confirmed && project.workflowStep !== 'calibration' ? 'digitize' : 'calibration'
-      setCalibrationConfirmed(confirmed); setWorkflowStep(step); setBrushErasing(false)
-      activateDataset(project.datasets[0]?.id ?? ''); setPointSelectionVersion((version) => version + 1); setMode(step === 'digitize' ? 'point' : 'select'); showNotice('Project opened. Process the image again before editing its reconstruction.')
-    } catch { showNotice('That project file is invalid or unsupported.', 'error') }
+      return {
+        ...blankChart(), imageName: typeof project.imageName === 'string' ? project.imageName : 'Imported plot',
+        imageUrl: project.imageUrl || null, sourceImageUrl: project.sourceImageUrl || project.imageUrl || null,
+        processedImageUrl: project.processedImageUrl || null, processedPreviewUrl: project.processedPreviewUrl || null,
+        upscale: project.upscale ?? { preset: 'hd', longEdge: 1920 },
+        imagePrepared: prepared, gridGuides: project.gridGuides || { horizontal: [], vertical: [] },
+        plotRegion: project.plotRegion || null, corrections: project.corrections || [],
+        axisGuides: project.axisGuides || { horizontal: null, vertical: null }, regularGrid: project.regularGrid ?? false,
+        reconstructionColors: project.reconstructionColors || { curve: '#000000', grid: '#000000', axis: '#000000' },
+        reconstructionWidths: project.reconstructionWidths || { curve: 1, grid: 1 },
+        eraserWidth: project.eraserWidth ?? ERASER_WIDTH, drawWidth: project.drawWidth ?? 1,
+        pointMarkerSize: project.pointMarkerSize ?? 100, reconstruction: null, needsProcess: true,
+        plotType: project.plotType || 'xy', compressorAxes: project.compressorAxes || defaultCompressorAxes,
+        xAxis: project.xAxis || blankAxis(), yAxis: project.yAxis || blankAxis(), datasets: project.datasets,
+        calibrationConfirmed: confirmed, workflowStep: step,
+        activeId: project.datasets.some((dataset: Dataset) => dataset.id === project.activeId) ? project.activeId : project.datasets[0]?.id ?? '',
+        fourPointValues: project.fourPointValues ?? initialFourPointValues,
+        xValue: typeof project.xValue === 'string' ? project.xValue : '0',
+        yValue: typeof project.yValue === 'string' ? project.yValue : '0',
+        mode: step === 'digitize' ? 'point' : 'select',
+      }
+      }
+      let snapshot: ProjectSnapshot
+      if (fileData.version === 1) {
+        const state = parseChart(fileData)
+        const id = crypto.randomUUID()
+        snapshot = { name: state.imageName, activeId: id, charts: [{ id, name: state.imageName, state }] }
+      } else if (fileData.version === 2 && typeof fileData.name === 'string' && Array.isArray(fileData.charts) && fileData.charts.length) {
+        const ids = new Set<string>()
+        const imported: ChartRecord[] = fileData.charts.map((chart: ChartRecord) => {
+          if (!chart || typeof chart.id !== 'string' || !chart.id || ids.has(chart.id) || typeof chart.name !== 'string' || !chart.name.trim()) throw new Error('Invalid chart name or id')
+          ids.add(chart.id)
+          return { id: chart.id, name: chart.name, state: parseChart(chart.state) }
+        })
+        if (!ids.has(fileData.activeChartId)) throw new Error('Invalid active chart')
+        snapshot = { name: fileData.name, activeId: fileData.activeChartId, charts: imported }
+      } else throw new Error('Unsupported project file')
+      applyProject(snapshot)
+      showNotice('Project opened. Process each image again before editing its reconstruction.')
+    } catch (error) { showNotice(error instanceof Error ? `Could not open project: ${error.message}` : 'That project file is invalid or unsupported.', 'error') }
   }
 
   const addCalibrationPoint = (axis: 'x' | 'y') => setMode(axis === 'x' ? 'calibrate-x' : 'calibrate-y')
@@ -1120,12 +1571,23 @@ export default function App() {
   }
 
   return (
-    <main className="app-frame">
+    <main className="app-frame" inert={learningWorking} onPointerDownCapture={() => { pointerTransaction.current = true; pointerRecorded.current = false }}>
       <header className="topbar">
         <a className="brand" href="#" aria-label="Plotline home"><span className="brand-mark"><span /><span /><span /></span><span>plotline</span><span className="brand-divider" /><span className="brand-subtitle">DIGITIZER</span></a>
-        <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={imageName} onChange={(event) => setImageName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
-        <div className="top-actions" inert={Boolean(rotationPreview)}><button className="top-quiet" disabled={Boolean(pendingTrace)} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={!sourceImageUrl || Boolean(pendingTrace)}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
+        <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
+        <div className="top-actions" inert={Boolean(rotationPreview)}><button className="top-quiet" disabled={projectBusy} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button><button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button><button className="top-quiet" onClick={() => void exportExcel()} disabled={projectBusy}><FileSpreadsheet size={15} /> Export Excel</button><button className="export-top" onClick={() => exportDataset(activeDataset, 'csv')} disabled={!activeDataset?.points.length}><FileSpreadsheet size={15} /> Export data</button></div>
       </header>
+
+      <nav className="chart-tabs" aria-label="Project charts">
+        <div className="chart-tab-list" role="tablist" aria-label="Charts">
+          {charts.map((chart) => <div key={chart.id} className={`chart-tab-item ${chart.id === activeChartId ? 'active' : ''}`}>
+            {editingChartName?.id === chart.id
+              ? <form onSubmit={(event) => { event.preventDefault(); saveChartName() }}><input autoFocus aria-label={`Rename chart ${chart.name}`} value={editingChartName.value} onChange={(event) => setEditingChartName({ id: chart.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingChartName(null) } }} /><button type="submit" aria-label="Confirm chart name"><Check size={13} /></button></form>
+              : <><button role="tab" aria-selected={chart.id === activeChartId} disabled={projectBusy} onClick={() => switchChart(chart.id)}>{chart.name}</button><button className="chart-tab-action" disabled={projectBusy} title="Rename chart" aria-label={`Rename chart ${chart.name}`} onClick={() => setEditingChartName({ id: chart.id, value: chart.name })}><Pencil size={12} /></button><button className="chart-tab-action" disabled={projectBusy || charts.length < 2} title="Delete chart" aria-label={`Delete chart ${chart.name}`} onClick={() => deleteChart(chart.id)}><Trash2 size={12} /></button></>}
+          </div>)}
+        </div>
+        <button className="chart-add" onClick={addChart} disabled={projectBusy} aria-label="Add chart" title="Add chart">+</button>
+      </nav>
 
       <div className="type-ribbon" inert={Boolean(pendingTrace || rotationPreview)}><span className="ribbon-label">PLOT TYPE</span><div className="plot-tabs" role="tablist" aria-label="Plot type">
         {plotOptions.map(({ id, label, icon: Icon }) => <button key={id} role="tab" aria-selected={plotType === id} className={plotType === id ? 'plot-tab active' : 'plot-tab'} onClick={() => { setPlotType(id); setMode(workflowStep === 'digitize' ? (id === 'compressor' ? 'surge' : 'point') : 'select') }}><Icon size={15} /><span>{label}</span></button>)}
@@ -1162,11 +1624,11 @@ export default function App() {
             <button className="tool-button" onClick={() => imageInput.current?.click()}><span className="tool-icon"><ImagePlus size={16} /></span><span>Replace image</span></button>
             <div className="transform-grid"><button title="Rotate left" aria-label="Rotate left" onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /></button><button title="Rotate right" aria-label="Rotate right" onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /></button><button title="Flip horizontal" aria-label="Flip horizontal" onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /></button><button title="Flip vertical" aria-label="Flip vertical" onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /></button></div>
           </div>
-          <div className="rail-bottom"><span className="connection-indicator" /><span>All changes stay in this browser</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
+          <div className="rail-bottom"><span className="connection-indicator" /><span>{isDesktop ? 'Learning stays on this device' : 'Images stay on this device'}</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
         </aside>
 
         <section className="center-workspace" aria-label="Plot workspace">
-          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{imageName || 'Untitled plot'}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right" inert={Boolean(rotationPreview)}><button onClick={toggleCompare} disabled={!processedImageUrl || !sourceImageUrl || mode === 'prep-straighten'} aria-label={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} title={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} aria-pressed={showOriginalPreview}><Eye size={14} /> {showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button><button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl || mode === 'prep-straighten'} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo last point" onClick={() => { if (activeDataset) { updateDataset(activeId, (dataset) => ({ ...dataset, points: dataset.points.slice(0, -1) })); setPointSelectionVersion((version) => version + 1) } }} disabled={Boolean(pendingTrace) || workflowStep !== 'digitize' || !activePoints}><RotateCcw size={14} /> Undo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
+          <div className="workspace-toolbar"><div className="toolbar-left"><span className="breadcrumb-root">Workspace</span><span className="breadcrumb-separator">/</span><span className="breadcrumb-active">{charts.find((chart) => chart.id === activeChartId)?.name}</span><span className="image-badge">{imageUrl ? 'IMAGE LOADED' : 'NO IMAGE'}</span></div><div className="toolbar-right" inert={Boolean(rotationPreview)}><button onClick={toggleCompare} disabled={!processedImageUrl || !sourceImageUrl || mode === 'prep-straighten'} aria-label={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} title={showOriginalPreview ? 'Show reconstruction' : 'Compare original'} aria-pressed={showOriginalPreview}><Eye size={14} /> {showOriginalPreview ? 'Show reconstruction' : 'Compare original'}</button><button onClick={() => setShowBackground((current) => !current)} disabled={!imageUrl || mode === 'prep-straighten'} aria-pressed={showBackground}>{showBackground ? 'Hide image' : 'Show image'}</button><button title="Undo (Ctrl+Z)" onClick={() => changeHistory('undo')} disabled={projectBusy || !historyAvailability.undo}><Undo2 size={14} /> Undo</button><button title="Redo (Ctrl+Shift+Z)" onClick={() => changeHistory('redo')} disabled={projectBusy || !historyAvailability.redo}><Redo2 size={14} /> Redo</button><span className="toolbar-separator" /><button title="Show point table" disabled={workflowStep !== 'digitize'} className={showTable && workflowStep === 'digitize' ? 'toolbar-active' : ''} onClick={() => setShowTable(!showTable)}><Layers size={14} /> Data table</button></div></div>
           {plotType === 'compressor' && <div className="compressor-banner"><Gauge size={15} /><span><strong>Compressor map mode</strong> · Trace speed/IGV and efficiency curves directly; boundaries optionally stop speed traces.</span><span className="boundary-progress"><i className={datasets.some((dataset) => dataset.kind === 'surge' && dataset.points.length >= 2) ? 'complete' : ''} />Surge <i className={datasets.some((dataset) => dataset.kind === 'choke' && dataset.points.length >= 2) ? 'complete' : ''} />Choke</span></div>}
           <div className={`canvas-zone ${dragActive ? 'drag-active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true) }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragActive(false) }} onDrop={(event) => { event.preventDefault(); setDragActive(false); const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('image/')); if (file) openImage(file) }}>
             <PlotCanvas imageUrl={rotationPreview?.url ?? (showOriginalPreview ? sourceImageUrl : imageUrl)} displayImageUrl={!rotationPreview && !showOriginalPreview && processedImageUrl ? processedPreviewUrl : null} onImageError={() => showNotice('Could not load the plot image or upscaled preview.', 'error')} onSaveError={(message) => showNotice(message, 'error')} imageName={imageName} imageLabel={rotationPreview ? 'Rotation preview — not applied' : showOriginalPreview ? 'Original scan' : processedImageUrl ? 'Reconstructed plot' : 'Original image'} showBackground={Boolean(rotationPreview) || showBackground} datasets={previewDatasets} activeDatasetId={activeId} selectionVersion={pointSelectionVersion} onSelectDataset={activateDataset} mode={mode} gridGuides={!rotationPreview && showGuides && mode !== 'prep-straighten' ? gridGuides : { horizontal: [], vertical: [] }} axisGuides={!rotationPreview && showGuides && mode !== 'prep-straighten' ? axisGuides : { horizontal: null, vertical: null }} plotRegion={!rotationPreview && showGuides && mode !== 'prep-straighten' ? plotRegion : null}
@@ -1268,7 +1730,6 @@ export default function App() {
               onClearGridGuides={() => { if (!preprocessing) { setGridGuides({ horizontal: [], vertical: [] }); setNeedsProcess(true); setImagePrepared(false); setMode('select') } }}
               onClearAxisGuides={() => { if (!preprocessing) { setAxisGuides({ horizontal: null, vertical: null }); setNeedsProcess(true); setImagePrepared(false); setMode('select') } }}
               onRegularGridChange={(enabled) => { if (!preprocessing) { setRegularGrid(enabled); setNeedsProcess(true); setImagePrepared(false) } }}
-              onUndoCorrection={() => updateCorrections(corrections.slice(0, -1))}
               onContinue={() => { if (healPreview) { showNotice('Apply or discard the proposed connection before continuing.', 'error'); return }; confirmPreparedImage() }} />}
             {imagePrepared && <>
             {workflowStep === 'calibration' && <><section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
@@ -1381,8 +1842,22 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">CALIBRATION</span><h2>Marker appearance</h2></div></div><p className="section-copy">The selected calibration point uses this color. Confirmed calibration hides the markers.</p><label className="format-control"><span>Selected marker color</span><input aria-label="Selected calibration marker color" type="color" value={calibrationMarkerColor} onChange={(event) => setCalibrationMarkerColor(event.target.value)} /></label></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={exportProject}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{isDesktop ? 'Local learning' : 'Shared learning'}</h2></div></div>
+              <p className="section-copy">{isDesktop ? 'Learning stores numeric comparisons locally, not new training images. Images saved by older versions remain until deleted.' : 'Learning sends numeric curve comparisons and model updates to Supabase, not images. Numeric data may reveal information. Anyone with the public key can submit updates.'} Grid edits do not train the model. Review every result; Undo does not undo learning.</p>
+              {learningError ? <p className="section-copy" role="alert">Storage unavailable: {learningError}. Restart the app to retry.</p> : learningState ? <>
+                <label className="format-control"><span>Enable learning</span><input type="checkbox" disabled={syncing} checked={learningState.enabled} onChange={(event) => { void setLearningEnabled(event.target.checked) }} /></label>
+                <p className="section-copy">Curve model updates: {learningState.model.samples}</p>
+                {lastComparison && <p className="section-copy">Last curve comparison: {lastComparison[1]} pixels added, {lastComparison[2]} removed, {lastComparison[3]} retained. Counts use exact pixel overlap.</p>}
+                {!isDesktop && <><p className="section-copy">Pending online updates: {pendingUpdates}{syncing ? ' · Synchronizing…' : ''}</p>
+                  {(onlineConfiguration.error || !onlineConfiguration.config) && <p className="section-copy" role="alert">{onlineConfiguration.error ?? 'Supabase is not configured; updates remain on this device.'}</p>}
+                  {syncError && <p className="section-copy" role="alert">Synchronization failed: {syncError} Updates remain queued.</p>}
+                  <button className="settings-action" disabled={!learningState.enabled || !onlineConfiguration.config || syncing} onClick={synchronizeLearning}>Retry synchronization</button>
+                </>}
+                <button className="settings-action" disabled={syncing} onClick={() => { void clearLearning() }}>Delete local learning data</button>
+              </> : <p className="section-copy">Loading local learning settings…</p>}
+            </section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">OUTPUT</span><h2>Data formatting</h2></div></div><p className="section-copy">Apply sort order and numeric precision to generated exports.</p><label className="format-control"><span>Sort points by</span><select aria-label="Export sort order" value={sortBy} onChange={(event) => setSortBy(event.target.value as 'x' | 'y')}><option value="x">X ascending</option><option value="y">Y ascending</option></select></label><label className="format-control precision-control"><span>Significant digits <strong>{precision}</strong></span><input aria-label="Export precision" type="range" min="2" max="12" step="1" value={precision} onChange={(event) => setPrecision(Number(event.target.value))} /></label></section>
-            <section className="settings-disclaimer"><CircleHelp size={16} /><p>Projects are stored in files you download; images and extracted datasets are not uploaded to a server.</p></section>
+            <section className="settings-disclaimer"><CircleHelp size={16} /><p>Project images and extracted datasets are not uploaded. {isDesktop ? 'Learning stays on this device.' : 'When enabled, numeric learning updates may be sent online.'}</p></section>
           </div>}
         </aside>
       </div>

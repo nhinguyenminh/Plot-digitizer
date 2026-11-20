@@ -20,6 +20,7 @@ export interface Reconstruction {
   vertical: number[]
   curves: PixelPoint[][]
   estimatedCurves?: number[]
+  learnedCorrections?: Correction[]
   horizontalAxis?: number
   verticalAxis?: number
 }
@@ -107,6 +108,8 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   const visited = new Uint8Array(w * h)
   const queue = new Int32Array(w * h)
   const minimumExtent = Math.max(12, Math.round(Math.min(w, h) * 0.06))
+  const outerHorizontal = horizontal.length >= 2 && vertical.length >= 2 ? [horizontal[0] - top, horizontal[horizontal.length - 1] - top] : []
+  const outerVertical = horizontal.length >= 2 && vertical.length >= 2 ? [vertical[0] - left, vertical[vertical.length - 1] - left] : []
   for (let start = 0; start < ink.length; start++) {
     if (!ink[start] || visited[start]) continue
     let head = 0; let tail = 0
@@ -125,7 +128,11 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       }
     }
     const extent = Math.hypot(maxX - minX, maxY - minY)
-    if (extent < minimumExtent && !(touchesGrid && extent >= 6)) {
+    const edgeTick = touchesGrid && (
+      (maxX - minX <= 3 && maxY - minY <= 12 && outerHorizontal.some((line) => Math.min(Math.abs(minY - line), Math.abs(maxY - line)) <= 5))
+      || (maxY - minY <= 3 && maxX - minX <= 12 && outerVertical.some((line) => Math.min(Math.abs(minX - line), Math.abs(maxX - line)) <= 5))
+    )
+    if (edgeTick || (extent < minimumExtent && !(touchesGrid && extent >= 6))) {
       for (let index = 0; index < tail; index++) ink[queue[index]] = 0
     }
   }
@@ -170,8 +177,11 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x)
       minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y)
     }
-    return (maxX - minX >= 6 && maxY - minY <= 1 && horizontal.some((line) => line >= maxY - 4 && line <= minY + 4))
-      || (maxY - minY >= 6 && maxX - minX <= 1 && vertical.some((line) => line >= maxX - 4 && line <= minX + 4))
+    const xSpan = maxX - minX; const ySpan = maxY - minY
+    return (xSpan >= 6 && ySpan <= 1 && horizontal.some((line) => line >= maxY - 4 && line <= minY + 4))
+      || (ySpan >= 6 && xSpan <= 1 && vertical.some((line) => line >= maxX - 4 && line <= minX + 4))
+      || (xSpan >= 80 && ySpan <= Math.min(6, xSpan * 0.04) && horizontal.some((line) => line >= maxY - 8 && line <= minY + 8))
+      || (ySpan >= 80 && xSpan <= Math.min(6, ySpan * 0.04) && vertical.some((line) => line >= maxX - 8 && line <= minX + 8))
   }
   const component = new Int32Array(w * h).fill(-1)
   let componentCount = 0
@@ -344,7 +354,7 @@ function renderReconstructionLayers(geometry: Reconstruction, corrections: Corre
     for (const point of points.slice(1)) curveContext.lineTo(point.x, point.y)
     curveContext.stroke()
   }
-  for (const correction of corrections) {
+  for (const correction of [...(geometry.learnedCorrections ?? []), ...corrections]) {
     if (!correction.points.length || (!correction.erase && correction.points.length < 2)) continue
     const targets = correction.layer === 'grid' ? [grid] : correction.layer === 'curve' || !correction.erase ? [curve] : [grid, curve]
     for (const target of targets) {
@@ -397,7 +407,8 @@ export async function reconstructImage(source: string, region: PlotRegion | null
   const context = canvas.getContext('2d', { willReadFrequently: true })
   if (!context) throw new Error('This browser cannot process the image.')
   context.drawImage(image, 0, 0)
-  const geometry = detectReconstruction(context.getImageData(0, 0, canvas.width, canvas.height),
+  const sourcePixels = context.getImageData(0, 0, canvas.width, canvas.height)
+  const geometry = detectReconstruction(sourcePixels,
     region ?? { x: 0, y: 0, width: canvas.width - 1, height: canvas.height - 1 }, guides, options)
   if (!geometry.curves.length && !geometry.horizontal.length && !geometry.vertical.length) throw new Error('No plot lines found. Select the plot area and try again.')
   if (!region && geometry.horizontal.length >= 2 && geometry.vertical.length >= 2) {
@@ -407,5 +418,5 @@ export async function reconstructImage(source: string, region: PlotRegion | null
     const bottom = geometry.horizontal[geometry.horizontal.length - 1]
     if (right - left >= 20 && bottom - top >= 20) geometry.region = { x: left, y: top, width: right - left, height: bottom - top }
   }
-  return { dataUrl: renderReconstruction(geometry, corrections, colors, widths), geometry }
+  return { dataUrl: renderReconstruction(geometry, corrections, colors, widths), geometry, sourcePixels }
 }

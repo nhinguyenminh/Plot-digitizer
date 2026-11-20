@@ -77,6 +77,31 @@ test('removes straight offset grid remnants without removing a nearby bent curve
   assert.ok(!result.curves.flat().some((p) => p.x >= 90 && p.x <= 115 && p.y === 61))
 })
 
+test('removes short tick marks on outer grid lines without removing an interior curve', () => {
+  const plot = image(180, 160)
+  for (const y of [20, 80, 140]) for (let x = 10; x <= 170; x++) plot.mark(x, y)
+  for (const x of [10, 90, 170]) for (let y = 20; y <= 140; y++) plot.mark(x, y)
+  for (let y = 20; y <= 30; y++) plot.mark(40, y)
+  for (let x = 10; x <= 20; x++) plot.mark(x, 50)
+  for (let x = 30; x <= 150; x++) plot.mark(x, Math.round(120 - (x - 30) * 0.3))
+  const result = detectReconstruction(plot, { x: 10, y: 20, width: 160, height: 120 }, { horizontal: [], vertical: [] })
+  const points = result.curves.flat()
+  assert.ok(!points.some((p) => p.x === 40 && p.y >= 23 && p.y <= 30))
+  assert.ok(!points.some((p) => p.y === 50 && p.x >= 13 && p.x <= 20))
+  assert.ok(points.some((p) => p.x >= 55 && p.x <= 65 && p.y >= 110 && p.y <= 115))
+})
+
+test('suppresses long skewed grid remnants but preserves a nearby bent curve', () => {
+  const plot = image(240, 180)
+  for (let y = 10; y <= 170; y++) plot.mark(120, y)
+  for (let y = 20; y <= 160; y++) plot.mark(116 - Math.floor((y - 20) / 35), y)
+  for (let y = 20; y <= 80; y++) plot.mark(130 + Math.round(4 * Math.sin((y - 20) / 15)), y)
+  const result = detectReconstruction(plot, { x: 10, y: 10, width: 220, height: 160 }, { horizontal: [], vertical: [] })
+  const points = result.curves.flat()
+  assert.ok(!points.some((p) => p.x >= 112 && p.x <= 116 && p.y >= 40 && p.y <= 140))
+  assert.ok(points.some((p) => p.x >= 130 && p.y >= 40 && p.y <= 60))
+})
+
 test('bridges a curve through a grid line without inventing a continuation for an isolated endpoint', () => {
   const plot = image(140, 120)
   for (let y = 10; y <= 110; y++) plot.mark(70, y)
