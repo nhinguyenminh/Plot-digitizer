@@ -19,6 +19,27 @@ export interface Dataset {
 }
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
 
+export function calibrationFromDrafts(axis: AxisCalibration, drafts: string[], coordinate: 'x' | 'y'): AxisCalibration {
+  if (axis.points.length < 2 || drafts.length !== axis.points.length) throw new Error('Choose at least two reference points on each axis.')
+  const points = axis.points.map((point, index) => {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) throw new Error('Reference point coordinates must be finite.')
+    const raw = drafts[index].trim()
+    const value = !raw ? NaN : axis.scale === 'date' ? Date.parse(raw) : Number(raw)
+    if (!Number.isFinite(value) || (axis.scale === 'log' && value <= 0) || (axis.scale === 'inverse' && value === 0)) {
+      throw new Error('Enter valid values for every reference point (log values must be positive; inverse values cannot be zero).')
+    }
+    return { ...point, value }
+  })
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      if (Math.abs(points[i][coordinate] - points[j][coordinate]) < 4 || points[i].value === points[j].value) {
+        throw new Error('Reference points on each axis must have distinct values and be at least 4 pixels apart.')
+      }
+    }
+  }
+  return { ...axis, points }
+}
+
 export function calibrateFromIntersections(
   intersections: [PixelPoint, PixelPoint],
   values: [number, number, number, number],

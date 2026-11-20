@@ -13,7 +13,7 @@ import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-pro
 import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, reconstructionDimensions, renderReconstruction, renderReconstructionCurveLayer } from './lib/reconstruct'
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
-import { calibrateFromIntersections, downloadFile, pointToData, traceColor } from './lib/digitizer'
+import { calibrationFromDrafts, downloadFile, pointToData, traceColor } from './lib/digitizer'
 import { createBrushMask, extractBrushCurves } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
@@ -120,6 +120,8 @@ interface ChartState {
   yAxis: AxisCalibration
   compressorAxes: CompressorAxes
   calibrationConfirmed: boolean
+  calibrationDrafts: { x: string[]; y: string[] }
+  calibrationScales: { x: ScaleType; y: ScaleType }
   workflowStep: WorkflowStep
   pointMarkerSize: number
   fourPointValues: FourPointValues
@@ -140,6 +142,7 @@ const blankChart = (): ChartState => ({
   needsProcess: true, imagePrepared: false, plotType: 'xy', datasets: [], activeId: '',
   xAxis: blankAxis(), yAxis: blankAxis(), compressorAxes: defaultCompressorAxes,
   calibrationConfirmed: false, workflowStep: 'image', pointMarkerSize: 100,
+  calibrationDrafts: { x: [], y: [] }, calibrationScales: { x: 'linear', y: 'linear' },
   fourPointValues: initialFourPointValues, xValue: '0', yValue: '0', mode: 'select',
 })
 
@@ -201,6 +204,9 @@ export default function App() {
   const [yValue, setYValue] = useState('0')
   const [fourPointValues, setFourPointValues] = useState<FourPointValues>(initialFourPointValues)
   const [fourPointPixels, setFourPointPixels] = useState<PixelPoint[]>([])
+  const [calibrationPhase, setCalibrationPhase] = useState<'points' | 'values'>('points')
+  const [calibrationDrafts, setCalibrationDrafts] = useState<{ x: string[]; y: string[] }>({ x: [], y: [] })
+  const [calibrationScales, setCalibrationScales] = useState<{ x: ScaleType; y: ScaleType }>({ x: 'linear', y: 'linear' })
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(20)
@@ -259,7 +265,7 @@ export default function App() {
     imageName, imageUrl, sourceImageUrl, processedImageUrl, processedPreviewUrl, upscale, gridGuides, axisGuides,
     regularGrid, plotRegion, reconstruction, corrections, reconstructionColors, reconstructionWidths, eraserWidth,
     drawWidth, needsProcess, imagePrepared, plotType, datasets, activeId, xAxis, yAxis, compressorAxes,
-    calibrationConfirmed, workflowStep, pointMarkerSize, fourPointValues, xValue, yValue, mode,
+    calibrationConfirmed, calibrationDrafts, calibrationScales, workflowStep, pointMarkerSize, fourPointValues, xValue, yValue, mode,
   }
   const currentProject = (): ProjectSnapshot => ({
     name: projectName, activeId: activeChartId,
@@ -279,8 +285,12 @@ export default function App() {
     setXAxis(state.xAxis); setYAxis(state.yAxis); setCompressorAxes(state.compressorAxes)
     setCalibrationConfirmed(state.calibrationConfirmed); setWorkflowStep(state.workflowStep)
     setPointMarkerSize(state.pointMarkerSize); setBrushMarks([]); setFourPointValues(state.fourPointValues)
-    setXValue(state.xValue); setYValue(state.yValue); setMode(state.mode); activateDataset(state.activeId)
+    setXValue(state.xValue); setYValue(state.yValue)
+    setMode(state.workflowStep === 'calibration' ? 'calibrate-edit' : state.mode); activateDataset(state.activeId)
     setAxisDetection(null); setGridDetection(null); setFourPointPixels([]); setBrushErasing(false)
+    setCalibrationPhase('points')
+    setCalibrationDrafts(state.calibrationDrafts)
+    setCalibrationScales(state.calibrationScales)
     setShowOriginalPreview(false); setShowBackground(true); setRotationPreview(null)
     setPointSelectionVersion((version) => version + 1)
   }
@@ -334,16 +344,16 @@ export default function App() {
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'p') setMode('point')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'a') setMode('trace-region')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'm') setMode('point-edit')
-      if (workflowStep === 'calibration' && event.key.toLowerCase() === 'c') setMode('calibrate-edit')
+      if (workflowStep === 'calibration' && calibrationPhase === 'points' && event.key.toLowerCase() === 'c') setMode('calibrate-edit')
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [workflowStep, pendingTrace, learningWorking])
+  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
   const showGuides = needsProcess || mode === 'grid-horizontal' || mode === 'grid-vertical' || mode === 'guide-axis-x' || mode === 'guide-axis-y' || mode === 'prep-region'
   const totalPoints = datasets.reduce((sum, dataset) => sum + dataset.points.length, 0)
-  const calibrated = xAxis.points.length >= 2 && yAxis.points.length >= 2
+  const calibrated = calibrationConfirmed && xAxis.points.length >= 2 && yAxis.points.length >= 2
   const calibratedPoints = useMemo(() => activeDataset?.points.map((point) => pointToData(point, xAxis, yAxis)).filter((point) => point !== null) ?? [], [activeDataset, xAxis, yAxis])
   const previewDatasets = useMemo(() => {
     if (!rotationPreview) return datasets
@@ -475,6 +485,7 @@ export default function App() {
     setXAxis(blankAxis()); setYAxis(blankAxis()); setDatasets([]); activateDataset('')
     setCompressorAxes(defaultCompressorAxes)
     setFourPointPixels([])
+    setCalibrationPhase('points'); setCalibrationDrafts({ x: [], y: [] }); setCalibrationScales({ x: 'linear', y: 'linear' })
     setWorkflowStep('image'); setCalibrationConfirmed(false); setBrushErasing(false)
     setMode('select')
   }
@@ -627,7 +638,8 @@ export default function App() {
     if (showOriginalPreview && processedImageUrl) setShowOriginalPreview(false)
     setImagePrepared(true)
     setWorkflowStep('calibration')
-    setMode('calibrate-x')
+    setCalibrationPhase('points')
+    setMode('calibrate-edit')
   }
 
   const setLearningEnabled = async (enabled: boolean) => {
@@ -662,19 +674,22 @@ export default function App() {
   const detectAxes = async () => {
     if (!imageUrl) return
     const run = processingRun.current
+    setGridDetecting(true)
     try {
       const detected = await detectPlotAxes(imageUrl)
       if (run !== processingRun.current) return
       if (!detected) { showNotice('Could not confidently find the bottom and left axes. Try cropping the chart or adjust the scan first.', 'error'); return }
       setAxisDetection(detected)
-      const origin: CalPoint = { ...detected.intersection, value: xAxis.scale === 'date' ? Date.parse(xValue) : Number(xValue) }
-      const yOrigin: CalPoint = { ...detected.intersection, value: yAxis.scale === 'date' ? Date.parse(yValue) : Number(yValue) }
-      if (!Number.isFinite(origin.value) || !Number.isFinite(yOrigin.value)) { showNotice('Enter numeric axis values before detecting the origin.', 'error'); return }
+      const origin: CalPoint = { ...detected.intersection, value: 1 }
+      const yOrigin: CalPoint = { ...detected.intersection, value: 1 }
       setXAxis((current) => ({ ...current, points: [origin, ...current.points.slice(1)] }))
       setYAxis((current) => ({ ...current, points: [yOrigin, ...current.points.slice(1)] }))
+      setCalibrationDrafts((current) => ({ x: ['', ...current.x.slice(1)], y: ['', ...current.y.slice(1)] }))
+      setCalibrationConfirmed(false)
       setMode('calibrate-x')
       showNotice('Axes located near the lower and left edges. Their intersection was added as the first X/Y calibration point; verify it against the chart.')
     } catch { if (run === processingRun.current) showNotice('Axis detection failed while reading this image.', 'error') }
+    finally { setGridDetecting(false) }
   }
 
   const calibrateFromDetectedGrid = async () => {
@@ -690,18 +705,6 @@ export default function App() {
         return
       }
 
-      const values = (['x1', 'x2', 'y1', 'y2'] as const).map((key, index) => {
-        const scale = index < 2 ? xAxis.scale : yAxis.scale
-        return scale === 'date' ? Date.parse(fourPointValues[key]) : Number(fourPointValues[key])
-      })
-      const isValid = (value: number, scale: ScaleType) =>
-        Number.isFinite(value) && (scale !== 'log' || value > 0) && (scale !== 'inverse' || value !== 0)
-      if (!values.every((value, index) => isValid(value, index < 2 ? xAxis.scale : yAxis.scale))
-        || values[0] === values[1] || values[2] === values[3]) {
-        showNotice('Enter distinct, valid X1, X2, Y1 and Y2 tick values before automatic calibration.', 'error')
-        return
-      }
-
       const left = detected.verticalLines[0]
       const right = detected.verticalLines[detected.verticalLines.length - 1]
       const top = detected.horizontalLines[0]
@@ -709,18 +712,19 @@ export default function App() {
       setXAxis({
         ...xAxis,
         points: [
-          { x: left, y: bottom, value: values[0] },
-          { x: right, y: bottom, value: values[1] },
+          { x: left, y: bottom, value: 1 },
+          { x: right, y: bottom, value: 2 },
         ],
       })
       setYAxis({
         ...yAxis,
         points: [
-          { x: left, y: top, value: values[2] },
-          { x: left, y: bottom, value: values[3] },
+          { x: left, y: top, value: 1 },
+          { x: left, y: bottom, value: 2 },
         ],
       })
       setCalibrationConfirmed(false)
+      setCalibrationDrafts({ x: ['', ''], y: ['', ''] })
       setGridDetection(detected)
       setMode('calibrate-edit')
       showNotice(`Detected ${detected.verticalLines.length} vertical and ${detected.horizontalLines.length} horizontal grid lines. Check the highlighted calibration points and adjust them if needed.`)
@@ -744,14 +748,6 @@ export default function App() {
   const updateCalibrationPoint = (axis: 'x' | 'y', index: number, point: PixelPoint) => {
     const update = axis === 'x' ? setXAxis : setYAxis
     update((current) => ({ ...current, points: current.points.map((calPoint, pointIndex) => pointIndex === index ? { ...calPoint, ...point } : calPoint) }))
-    setCalibrationConfirmed(false)
-  }
-  const updateCalibrationValue = (axis: 'x' | 'y', index: number, rawValue: string) => {
-    const calibration = axis === 'x' ? xAxis : yAxis
-    const value = calibration.scale === 'date' ? Date.parse(rawValue) : Number(rawValue)
-    if (!Number.isFinite(value) || (calibration.scale === 'log' && value <= 0) || (calibration.scale === 'inverse' && value === 0)) return
-    const update = axis === 'x' ? setXAxis : setYAxis
-    update((current) => ({ ...current, points: current.points.map((point, pointIndex) => pointIndex === index ? { ...point, value } : point) }))
     setCalibrationConfirmed(false)
   }
   const updateCompressorAxis = (axis: 'x' | 'y', patch: Partial<CompressorAxisConfig>) => setCompressorAxes((current) => ({
@@ -1056,28 +1052,18 @@ export default function App() {
     }
     if (!imagePrepared) return
     if (mode === 'calibrate-intersections') {
-      if (!fourPointPixels.length) {
-        setFourPointPixels([point])
-        showNotice('First intersection captured. Click the second intersection.')
+      if (fourPointPixels.length && (Math.abs(fourPointPixels[0].x - point.x) < 4 || Math.abs(fourPointPixels[0].y - point.y) < 4)) {
+        showNotice('Intersections must be at least 4 pixels apart on both axes.', 'error')
         return
       }
-      const parseValue = (key: keyof FourPointValues, scale: ScaleType) =>
-        !fourPointValues[key].trim() ? NaN : scale === 'date' ? Date.parse(fourPointValues[key]) : Number(fourPointValues[key])
-      const values: [number, number, number, number] = [
-        parseValue('x1', xAxis.scale), parseValue('x2', xAxis.scale),
-        parseValue('y1', yAxis.scale), parseValue('y2', yAxis.scale),
-      ]
-      try {
-        const calibration = calibrateFromIntersections([fourPointPixels[0], point], values, xAxis.scale, yAxis.scale)
-        setXAxis(calibration.xAxis)
-        setYAxis(calibration.yAxis)
-        setCalibrationConfirmed(false)
-        setFourPointPixels([])
-        setMode('calibrate-edit')
-        showNotice('Calibration created from two intersections. Review and adjust the markers before confirming.')
-      } catch (error) {
-        showNotice(error instanceof Error ? error.message : 'Invalid calibration.', 'error')
-      }
+      const points = [...fourPointPixels, point]
+      setFourPointPixels(points)
+      setXAxis((current) => ({ ...current, points: points.map((pixel, index) => ({ ...pixel, value: index + 1 })) }))
+      setYAxis((current) => ({ ...current, points: points.map((pixel, index) => ({ ...pixel, value: index + 1 })) }))
+      setCalibrationDrafts({ x: points.map(() => ''), y: points.map(() => '') })
+      setCalibrationConfirmed(false)
+      if (points.length === 2) { setMode('calibrate-edit'); showNotice('Review the markers, then confirm their positions.') }
+      else showNotice('First intersection captured. Click the second intersection.')
       return
     }
     if (mode === 'calibrate-four') {
@@ -1085,13 +1071,6 @@ export default function App() {
       const keys: (keyof FourPointValues)[] = ['x1', 'x2', 'y1', 'y2']
       const key = keys[step]
       if (!key) { setFourPointPixels([]); return }
-      const axis = step < 2 ? xAxis : yAxis
-      const rawValue = fourPointValues[key]
-      const value = axis.scale === 'date' ? Date.parse(rawValue) : Number(rawValue)
-      if (!Number.isFinite(value)) {
-        showNotice(`Enter a valid ${axis.scale === 'date' ? 'date/time' : 'numeric'} value for ${key.toUpperCase()} before clicking the chart.`, 'error')
-        return
-      }
       const duplicatePixel = step === 1
         ? Math.abs(fourPointPixels[0].x - point.x) < 4
         : step === 3 && Math.abs(fourPointPixels[2].y - point.y) < 4
@@ -1100,39 +1079,28 @@ export default function App() {
         return
       }
       const nextPixels = [...fourPointPixels, point]
+      setFourPointPixels(nextPixels)
+      const axis = step < 2 ? 'x' : 'y'
+      const update = axis === 'x' ? setXAxis : setYAxis
+      update((current) => ({ ...current, points: [...current.points, { ...point, value: current.points.length + 1 }] }))
+      setCalibrationDrafts((current) => ({ ...current, [axis]: [...current[axis], ''] }))
+      setCalibrationConfirmed(false)
       if (nextPixels.length === 4) {
-        const values = keys.map((item) => {
-          const scale = item.startsWith('x') ? xAxis.scale : yAxis.scale
-          return scale === 'date' ? Date.parse(fourPointValues[item]) : Number(fourPointValues[item])
-        })
-        const validScaleValue = (value: number, scale: ScaleType) =>
-          Number.isFinite(value) && (scale !== 'log' || value > 0) && (scale !== 'inverse' || value !== 0)
-        if (!values.every((item, index) => validScaleValue(item, index < 2 ? xAxis.scale : yAxis.scale))
-          || values[0] === values[1] || values[2] === values[3]) {
-          showNotice('Use distinct values valid for the selected axis scales (log values must be positive; inverse values cannot be zero).', 'error')
-          return
-        }
-        setXAxis({ ...xAxis, points: [0, 1].map((index) => ({ ...nextPixels[index], value: values[index] })) })
-        setYAxis({ ...yAxis, points: [2, 3].map((index) => ({ ...nextPixels[index], value: values[index] })) })
-        setCalibrationConfirmed(false)
-        setFourPointPixels([])
-        setMode('point')
-        showNotice('Four-point calibration complete. X and Y are calibrated from two reference points each.')
+        setMode('calibrate-edit')
+        showNotice('Review the markers, then confirm their positions.')
       } else {
-        setFourPointPixels(nextPixels)
         showNotice(`${key.toUpperCase()} captured. Click ${keys[step + 1].toUpperCase()} on the chart.`)
       }
       return
     }
     if (mode === 'calibrate-x' || mode === 'calibrate-y') {
       const current = mode === 'calibrate-x' ? xAxis : yAxis
-      const rawValue = mode === 'calibrate-x' ? xValue : yValue
-      const value = current.scale === 'date' ? Date.parse(rawValue) : Number(rawValue)
-      if (!Number.isFinite(value)) { showNotice(current.scale === 'date' ? 'Enter a recognizable date or time first.' : 'Enter a valid numeric tick value first.', 'error'); return }
-      const nextPoint: CalPoint = { ...point, value }
-      if (current.points.some((p) => Math.hypot(p.x - point.x, p.y - point.y) < 4)) { showNotice('That calibration point is too close to an existing one.', 'error'); return }
+      const nextPoint: CalPoint = { ...point, value: current.points.length + 1 }
+      if (current.points.some((p) => Math.abs(mode === 'calibrate-x' ? p.x - point.x : p.y - point.y) < 4)) { showNotice('Points on the same axis must be at least 4 pixels apart.', 'error'); return }
       if (mode === 'calibrate-x') setXAxis({ ...xAxis, points: [...xAxis.points, nextPoint] })
       else setYAxis({ ...yAxis, points: [...yAxis.points, nextPoint] })
+      const axis = mode === 'calibrate-x' ? 'x' : 'y'
+      setCalibrationDrafts((drafts) => ({ ...drafts, [axis]: [...drafts[axis], ''] }))
       setCalibrationConfirmed(false)
       showNotice(`${mode === 'calibrate-x' ? 'X' : 'Y'} calibration point ${current.points.length + 1} added.`)
       return
@@ -1209,6 +1177,11 @@ export default function App() {
     if (!context) { showNotice('This browser cannot crop the image.', 'error'); return }
     context.drawImage(image, x, y, width, height, 0, 0, width, height)
     const shiftPoint = (point: PixelPoint): PixelPoint => ({ x: point.x - x, y: point.y - y })
+    const insideCrop = (point: PixelPoint) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height
+    setCalibrationDrafts((current) => ({
+      x: current.x.filter((_, index) => insideCrop(xAxis.points[index])),
+      y: current.y.filter((_, index) => insideCrop(yAxis.points[index])),
+    }))
     setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map(shiftPoint) })))
     setXAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
     setYAxis((current) => ({ ...current, points: current.points.filter((point) => point.x >= x && point.x <= x + width && point.y >= y && point.y <= y + height).map((point) => ({ ...shiftPoint(point), value: point.value })) }))
@@ -1272,6 +1245,7 @@ export default function App() {
       const rotated = canvas.toDataURL('image/png')
       setDatasets((current) => current.map((dataset) => ({ ...dataset, points: dataset.points.map(geometry.transformPoint) })))
       setXAxis(blankAxis()); setYAxis(blankAxis()); setFourPointPixels([])
+      setCalibrationDrafts({ x: [], y: [] }); setCalibrationScales({ x: 'linear', y: 'linear' })
       setImageUrl(rotated); setSourceImageUrl(rotated); setProcessedImageUrl(null); setProcessedPreviewUrl(null); setShowOriginalPreview(false)
       setRotationPreview(null); setShowBackground(true)
       setAxisDetection(null); setGridDetection(null); setGridGuides({ horizontal: [], vertical: [] }); setPlotRegion(null)
@@ -1292,7 +1266,7 @@ export default function App() {
   }
 
   const getChartExportPoints = (dataset: Dataset, state: ChartState) => dataset.points
-    .map((point) => state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2 ? pointToData(point, state.xAxis, state.yAxis) : { x: point.x, y: point.y })
+    .map((point) => state.calibrationConfirmed && state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2 ? pointToData(point, state.xAxis, state.yAxis) : { x: point.x, y: point.y })
     .filter((point): point is { x: number; y: number } => point !== null)
     .sort((a, b) => sortBy === 'x' ? a.x - b.x : a.y - b.y)
     .map((point) => ({ x: Number(point.x.toPrecision(precision)), y: Number(point.y.toPrecision(precision)) }))
@@ -1379,7 +1353,7 @@ export default function App() {
           drawDatasets(context, state.datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * state.pointMarkerSize / 100)
           overlay = { base64: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }
         }
-        const isCalibrated = state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2
+        const isCalibrated = state.calibrationConfirmed && state.xAxis.points.length >= 2 && state.yAxis.points.length >= 2
         output.push({
           name: chart.name,
           datasets: state.datasets.map((dataset) => ({ dataset, points: getChartExportPoints(dataset, state) })),
@@ -1461,6 +1435,10 @@ export default function App() {
       if (project.plotType && !plotOptions.some((option) => option.id === project.plotType)) throw new Error('Invalid plot type')
       if (project.imagePrepared !== undefined && typeof project.imagePrepared !== 'boolean') throw new Error('Invalid image confirmation')
       if (project.fourPointValues && !['x1', 'x2', 'y1', 'y2'].every((key) => typeof project.fourPointValues[key] === 'string')) throw new Error('Invalid calibration inputs')
+      if (project.calibrationDrafts && !['x', 'y'].every((key) => Array.isArray(project.calibrationDrafts[key])
+        && project.calibrationDrafts[key].length === (project[`${key}Axis`]?.points?.length ?? 0)
+        && project.calibrationDrafts[key].every((value: unknown) => typeof value === 'string'))) throw new Error('Invalid calibration drafts')
+      if (project.calibrationScales && !['x', 'y'].every((key) => ['linear', 'log', 'inverse', 'date'].includes(project.calibrationScales[key]))) throw new Error('Invalid calibration scales')
       if (project.compressorAxes && !['x', 'y'].every((key) => {
         const axis = project.compressorAxes[key]
         return axis && typeof axis.label === 'string' && typeof axis.unit === 'string'
@@ -1504,6 +1482,11 @@ export default function App() {
         pointMarkerSize: project.pointMarkerSize ?? 100, reconstruction: null, needsProcess: true,
         plotType: project.plotType || 'xy', compressorAxes: project.compressorAxes || defaultCompressorAxes,
         xAxis: project.xAxis || blankAxis(), yAxis: project.yAxis || blankAxis(), datasets: project.datasets,
+        calibrationDrafts: project.calibrationDrafts ?? {
+          x: (project.xAxis?.points ?? []).map((point: CalPoint) => formatCalibrationValue(point.value, project.xAxis.scale)),
+          y: (project.yAxis?.points ?? []).map((point: CalPoint) => formatCalibrationValue(point.value, project.yAxis.scale)),
+        },
+        calibrationScales: project.calibrationScales ?? { x: project.xAxis?.scale ?? 'linear', y: project.yAxis?.scale ?? 'linear' },
         calibrationConfirmed: confirmed, workflowStep: step,
         activeId: project.datasets.some((dataset: Dataset) => dataset.id === project.activeId) ? project.activeId : project.datasets[0]?.id ?? '',
         fourPointValues: project.fourPointValues ?? initialFourPointValues,
@@ -1533,7 +1516,7 @@ export default function App() {
   }
 
   const addCalibrationPoint = (axis: 'x' | 'y') => setMode(axis === 'x' ? 'calibrate-x' : 'calibrate-y')
-  const updateScale = (axis: 'x' | 'y', scale: ScaleType) => axis === 'x' ? setXAxis({ ...xAxis, scale }) : setYAxis({ ...yAxis, scale })
+  const updateScale = (axis: 'x' | 'y', scale: ScaleType) => setCalibrationScales((current) => ({ ...current, [axis]: scale }))
   const activePoints = activeDataset?.points.length ?? 0
   const measuredDistance = calibrated && calibratedPoints.length >= 2
     ? Math.hypot(calibratedPoints[1].x - calibratedPoints[0].x, calibratedPoints[1].y - calibratedPoints[0].y)
@@ -1565,6 +1548,7 @@ export default function App() {
     if (target >= currentStepIndex || pendingTrace || loading || preprocessing || gridDetecting) return
     if (step === 'image') setImagePrepared(false)
     setCalibrationConfirmed(false)
+    setCalibrationPhase('points')
     setWorkflowStep(step)
     setMode(step === 'calibration' ? 'calibrate-edit' : 'select')
     setActivePanel('data')
@@ -1598,9 +1582,9 @@ export default function App() {
       </nav>
 
       <div className="workspace">
-        <aside className="left-rail" inert={Boolean(pendingTrace || rotationPreview)}>
+        <aside className="left-rail" inert={Boolean(pendingTrace || rotationPreview || gridDetecting)}>
           <div className="rail-section"><div className="rail-heading"><span>TOOLS</span></div>
-            {workflowStep === 'calibration' && <><div className="tool-group-label">CALIBRATION</div>
+            {workflowStep === 'calibration' && calibrationPhase === 'points' && <><div className="tool-group-label">CALIBRATION</div>
             <button className={`tool-button ${mode === 'calibrate-x' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('x')} disabled={!imagePrepared}><span className="tool-icon axis-x-icon">X</span><span>Calibrate X axis</span><kbd>{xAxis.points.length}/2</kbd></button>
             <button className={`tool-button ${mode === 'calibrate-y' ? 'selected' : ''}`} onClick={() => addCalibrationPoint('y')} disabled={!imagePrepared}><span className="tool-icon axis-y-icon">Y</span><span>Calibrate Y axis</span><kbd>{yAxis.points.length}/2</kbd></button>
             <button className={`tool-button ${mode === 'calibrate-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'calibrate-edit' ? 'select' : 'calibrate-edit')} disabled={!imagePrepared || xAxis.points.length + yAxis.points.length === 0}><span className="tool-icon"><MoveUpRight size={16} /></span><span>Modify calibration</span><kbd>C</kbd></button>
@@ -1639,8 +1623,8 @@ export default function App() {
               calibrationMarkerColor={calibrationMarkerColor}
               pointMarkerSize={pointMarkerSize}
               showCalibrationMarkers={!calibrationConfirmed || mode === 'calibrate-edit'}
-              xAxis={xAxis}
-              yAxis={yAxis}
+              xAxis={workflowStep === 'calibration' ? blankAxis() : xAxis}
+              yAxis={workflowStep === 'calibration' ? blankAxis() : yAxis}
               coordinateLabels={plotType === 'compressor'
                 ? { x: axisName(compressorAxes.x), y: axisName(compressorAxes.y) }
                 : { x: 'X', y: 'Y' }}
@@ -1657,7 +1641,7 @@ export default function App() {
               healPreview={healPreview}
               onApplyHealing={applyHealing}
               onHealChoiceChange={setHealChoice}
-              readOnly={Boolean(pendingTrace || rotationPreview)}
+              readOnly={Boolean(pendingTrace || rotationPreview || gridDetecting)}
               onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} canDeletePoint={workflowStep === 'digitize'}
               onDeleteSelectedPoint={(datasetId, index) => updateDataset(datasetId, (dataset) => ({ ...dataset, points: dataset.points.filter((_, pointIndex) => pointIndex !== index) }))}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
@@ -1674,7 +1658,7 @@ export default function App() {
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves, then press Auto point.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves, then press Auto point.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && workflowStep === 'digitize' && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -1732,48 +1716,59 @@ export default function App() {
               onRegularGridChange={(enabled) => { if (!preprocessing) { setRegularGrid(enabled); setNeedsProcess(true); setImagePrepared(false) } }}
               onContinue={() => { if (healPreview) { showNotice('Apply or discard the proposed connection before continuing.', 'error'); return }; confirmPreparedImage() }} />}
             {imagePrepared && <>
-            {workflowStep === 'calibration' && <><section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className={`calibration-state ${calibrated ? 'ready' : ''}`}>{calibrated ? <><Check size={12} /> READY</> : 'NEEDED'}</span></div>
-              <p className="section-copy">Click two known ticks on each axis and enter their values.</p>
-              <div className="four-point-calibration">
-                <strong>Guided 4-point calibration</strong>
-                <p>Enter tick values for X1 (left), X2 (right), Y1 (top), and Y2 (bottom), then click each matching point in order.</p>
-                <div className="four-point-values">
-                  {(['x1', 'x2', 'y1', 'y2'] as const).map((key) => {
-                    const coordinate = key.startsWith('x') ? 'x' : 'y'
-                    const label = plotType === 'compressor' ? axisName(compressorAxes[coordinate]) : `${coordinate.toUpperCase()} value`
-                    return <label key={key}>{key.toUpperCase()} · {label}<input aria-label={`${key.toUpperCase()} ${label} calibration value`} value={fourPointValues[key]} placeholder={(key.startsWith('x') ? xAxis.scale : yAxis.scale) === 'date' ? 'Date / time' : 'Tick value'} onChange={(event) => setFourPointValues((current) => ({ ...current, [key]: event.target.value }))} /></label>
-                  })}
+            {workflowStep === 'calibration' && <><section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className="calibration-state">{calibrationPhase === 'points' ? '1 / 2' : '2 / 2'}</span></div>
+              {calibrationPhase === 'points' ? <>
+                <p className="section-copy"><strong>1. Select reference points</strong><br />Select at least two points on each axis. Drag markers to adjust them, then confirm their positions.</p>
+                <div className="four-point-calibration">
+                  <strong>Guided selection</strong>
+                  <p>Click X1, X2, Y1 and Y2 in order.</p>
+                  <button className="axis-detect-button" disabled={gridDetecting} onClick={() => {
+                    setXAxis((current) => ({ ...current, points: [] })); setYAxis((current) => ({ ...current, points: [] }))
+                    setCalibrationDrafts({ x: [], y: [] }); setFourPointPixels([]); setCalibrationConfirmed(false); setMode('calibrate-four')
+                  }}>{mode === 'calibrate-four' ? 'Restart selection' : 'Select 4 points'}</button>
                 </div>
-                <button className="axis-detect-button" onClick={() => { setFourPointPixels([]); setMode('calibrate-four') }} disabled={!imagePrepared}>
-                  {mode === 'calibrate-four' && fourPointPixels.length ? 'Restart 4-point calibration' : 'Start 4-point calibration'}
-                </button>
-                <p>Alternatively, enter X1/Y1 and X2/Y2 for two grid intersections, in the order you click them.</p>
-                <button className="axis-detect-button" onClick={() => { setFourPointPixels([]); setMode('calibrate-intersections') }}>
-                  {mode === 'calibrate-intersections' && fourPointPixels.length ? 'Restart 2-intersection calibration' : 'Calibrate from 2 intersections'}
-                </button>
-              </div>
-              <AxisEditor axis="x" coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes.x) : 'X value'} calibration={xAxis} setValue={setXValue} value={xValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} updatePointValue={updateCalibrationValue} />
-              <AxisEditor axis="y" coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes.y) : 'Y value'} calibration={yAxis} setValue={setYValue} value={yValue} mode={mode} setMode={setMode} addPoint={addCalibrationPoint} setScale={updateScale} updatePointValue={updateCalibrationValue} />
-              {calibrated && <div className="calibration-confirm-row">
-                <span>{calibrationConfirmed ? 'Calibration confirmed · markers hidden' : 'Review the labeled points, then confirm calibration.'}</span>
-                <button className="axis-detect-button" onClick={() => {
-                  if (calibrationConfirmed) {
-                    setCalibrationConfirmed(false)
-                    setMode('calibrate-edit')
-                  } else {
-                    setCalibrationConfirmed(true)
-                    setWorkflowStep('digitize')
-                    setMode('point')
-                  }
-                }}>{calibrationConfirmed ? 'Modify calibration' : 'Confirm calibration'}</button>
-              </div>}
-              <button className="axis-detect-button" onClick={() => { void calibrateFromDetectedGrid() }} disabled={gridDetecting || !imagePrepared}>
-                <ScanSearch size={14} /> {gridDetecting ? 'Detecting grid…' : 'Detect grid & calibrate'}
-              </button>
-              <p className="axis-detect-note">Uses the outermost detected grid lines: X1 left, X2 right, Y1 top, Y2 bottom. Enter their tick values above.</p>
-              {gridDetection && <p className="axis-detect-note">Found {gridDetection.verticalLines.length} vertical × {gridDetection.horizontalLines.length} horizontal lines. Calibration markers are ready to fine-tune.</p>}
-              <button className="axis-detect-button" onClick={() => { void detectAxes() }}><ScanSearch size={14} /> Auto-detect axes & origin</button>
-              {axisDetection && <p className="axis-detect-note">Intersection near {Math.round(axisDetection.intersection.x)}, {Math.round(axisDetection.intersection.y)} px · verify against the scan.</p>}
+                <p className="axis-detect-note">X: {xAxis.points.length} points · Y: {yAxis.points.length} points</p>
+                <details><summary>Other selection methods</summary>
+                  <p className="axis-detect-note">Use the X/Y tools to add individual points, or select two intersections.</p>
+                  <button className="axis-detect-button" disabled={gridDetecting} onClick={() => {
+                    setXAxis((current) => ({ ...current, points: [] })); setYAxis((current) => ({ ...current, points: [] }))
+                    setCalibrationDrafts({ x: [], y: [] }); setFourPointPixels([]); setCalibrationConfirmed(false); setMode('calibrate-intersections')
+                  }}>Select 2 intersections</button>
+                  <button className="axis-detect-button" onClick={() => { void calibrateFromDetectedGrid() }} disabled={gridDetecting}>
+                    <ScanSearch size={14} /> {gridDetecting ? 'Detecting grid…' : 'Detect grid points'}
+                  </button>
+                  <p className="axis-detect-note">Uses the outermost grid lines: X1 left, X2 right, Y1 top, Y2 bottom.</p>
+                  {gridDetection && <p className="axis-detect-note">Found {gridDetection.verticalLines.length} vertical × {gridDetection.horizontalLines.length} horizontal lines. Check the markers.</p>}
+                  <button className="axis-detect-button" disabled={gridDetecting} onClick={() => { void detectAxes() }}><ScanSearch size={14} /> Auto-detect axes & origin</button>
+                  {axisDetection && <p className="axis-detect-note">Intersection near {Math.round(axisDetection.intersection.x)}, {Math.round(axisDetection.intersection.y)} px · verify against the scan.</p>}
+                </details>
+                <button className="axis-detect-button calibration-primary" disabled={gridDetecting} onClick={() => {
+                  try {
+                    for (const [axis, coordinate] of [[xAxis, 'x'], [yAxis, 'y']] as const) {
+                      calibrationFromDrafts({ ...axis, scale: 'linear' }, axis.points.map((_, index) => String(index + 1)), coordinate)
+                    }
+                    setCalibrationPhase('values'); setMode('select')
+                  } catch (error) { showNotice(error instanceof Error ? error.message : 'Invalid reference points.', 'error') }
+                }}>Confirm positions</button>
+              </> : <>
+                <p className="section-copy"><strong>2. Enter actual values</strong><br />Enter the value corresponding to each labeled marker and select the axis scales.</p>
+                {(['x', 'y'] as const).map((axis) => <AxisEditor key={axis} axis={axis}
+                  coordinateLabel={plotType === 'compressor' ? axisName(compressorAxes[axis]) : axis.toUpperCase()}
+                  calibration={axis === 'x' ? xAxis : yAxis} scale={calibrationScales[axis]} drafts={calibrationDrafts[axis]}
+                  setScale={updateScale} updatePointValue={(index, value) => setCalibrationDrafts((current) => ({
+                    ...current, [axis]: current[axis].map((draft, draftIndex) => draftIndex === index ? value : draft),
+                  }))} />)}
+                <div className="calibration-confirm-row">
+                  <button className="axis-detect-button" onClick={() => { setCalibrationPhase('points'); setMode('calibrate-edit') }}>Back to positions</button>
+                  <button className="axis-detect-button calibration-primary" onClick={() => {
+                    try {
+                      const nextX = calibrationFromDrafts({ ...xAxis, scale: calibrationScales.x }, calibrationDrafts.x, 'x')
+                      const nextY = calibrationFromDrafts({ ...yAxis, scale: calibrationScales.y }, calibrationDrafts.y, 'y')
+                      setXAxis(nextX); setYAxis(nextY); setCalibrationConfirmed(true); setWorkflowStep('digitize'); setMode('point')
+                    } catch (error) { showNotice(error instanceof Error ? error.message : 'Invalid calibration values.', 'error') }
+                  }}>Confirm calibration & continue</button>
+                </div>
+              </>}
             </section>
             {plotType === 'compressor' && <section className="panel-section compressor-axis-config">
               <div className="section-heading"><div><span className="section-kicker">COMPRESSOR MAP</span><h2>Map axes</h2></div></div>
@@ -1872,19 +1867,13 @@ export default function App() {
   )
 }
 
-function AxisEditor({ axis, coordinateLabel, calibration, value, setValue, mode, setMode, addPoint, setScale, updatePointValue }: {
-  axis: 'x' | 'y'; coordinateLabel: string; calibration: AxisCalibration; value: string; setValue: (value: string) => void; mode: ToolMode;
-  setMode: (mode: ToolMode) => void; addPoint: (axis: 'x' | 'y') => void; setScale: (axis: 'x' | 'y', scale: ScaleType) => void;
-  updatePointValue: (axis: 'x' | 'y', index: number, value: string) => void
+function AxisEditor({ axis, coordinateLabel, calibration, scale, drafts, setScale, updatePointValue }: {
+  axis: 'x' | 'y'; coordinateLabel: string; calibration: AxisCalibration; scale: ScaleType; drafts: string[];
+  setScale: (axis: 'x' | 'y', scale: ScaleType) => void;
+  updatePointValue: (index: number, value: string) => void
 }) {
-  const [pointValueDrafts, setPointValueDrafts] = useState(() => calibration.points.map((point) => formatCalibrationValue(point.value, calibration.scale)))
-  useEffect(() => {
-    setPointValueDrafts(calibration.points.map((point) => formatCalibrationValue(point.value, calibration.scale)))
-  }, [calibration.points, calibration.scale])
-
-  return <div className={`axis-editor ${mode === `calibrate-${axis}` ? 'axis-editor-active' : ''}`}>
-    <div className="axis-editor-top"><span className={`axis-letter axis-${axis}`}>{axis.toUpperCase()}</span><span className="axis-label">{axis === 'x' ? 'Horizontal axis' : 'Vertical axis'}</span><select aria-label={`${axis.toUpperCase()} axis scale`} value={calibration.scale} onChange={(event) => setScale(axis, event.target.value as ScaleType)}><option value="linear">Linear</option><option value="log">Log₁₀</option><option value="inverse">Inverse</option><option value="date">Date/time</option></select></div>
-    <div className="axis-point-entry"><span className="axis-point-index">P{calibration.points.length + 1}</span><input aria-label={`${coordinateLabel} tick value`} value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) addPoint(axis) }} placeholder={calibration.scale === 'date' ? 'e.g. 2026-04-14T09:30' : `${coordinateLabel} value`} /><button className={mode === `calibrate-${axis}` ? 'waiting' : ''} onClick={() => setMode(`calibrate-${axis}`)}>{mode === `calibrate-${axis}` ? 'Click chart' : 'Set point'}</button></div>
-    {calibration.points.length > 0 && <div className="axis-point-list">{calibration.points.map((point, index) => <label key={`${point.x}:${point.y}`}><span>P{index + 1}</span><input aria-label={`${coordinateLabel} calibration point ${index + 1} value`} value={pointValueDrafts[index] ?? ''} onChange={(event) => { setPointValueDrafts((current) => current.map((draft, draftIndex) => draftIndex === index ? event.target.value : draft)); updatePointValue(axis, index, event.target.value) }} /><small>{Math.round(point.x)}, {Math.round(point.y)} px</small></label>)}</div>}
+  return <div className="axis-editor">
+    <div className="axis-editor-top"><span className={`axis-letter axis-${axis}`}>{axis.toUpperCase()}</span><span className="axis-label">{axis === 'x' ? 'Horizontal axis' : 'Vertical axis'}</span><select aria-label={`${axis.toUpperCase()} axis scale`} value={scale} onChange={(event) => setScale(axis, event.target.value as ScaleType)}><option value="linear">Linear</option><option value="log">Log₁₀</option><option value="inverse">Inverse</option><option value="date">Date/time</option></select></div>
+    <div className="axis-point-list">{calibration.points.map((point, index) => <label key={index}><span>{axis.toUpperCase()}{index + 1}</span><input aria-label={`${coordinateLabel} calibration point ${index + 1} value`} value={drafts[index] ?? ''} placeholder={scale === 'date' ? 'Date / time' : 'Value'} onChange={(event) => updatePointValue(index, event.target.value)} /><small>{Math.round(point.x)}, {Math.round(point.y)} px</small></label>)}</div>
   </div>
 }
