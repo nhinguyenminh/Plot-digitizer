@@ -7,6 +7,8 @@ export interface BrushMark {
   width: number
   erase: boolean
   group?: string
+  mask?: Uint8Array
+  generated?: boolean
 }
 
 export const BRUSH_GROUPS = [
@@ -16,6 +18,8 @@ export const BRUSH_GROUPS = [
   { name: 'Cyan', color: '#00b9e8' },
 ]
 
+const maskCanvases = new WeakMap<Uint8Array, { width: number; height: number; canvas: HTMLCanvasElement }>()
+
 export function createBrushMask(width: number, height: number, marks: BrushMark[]): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.width = width
@@ -23,6 +27,30 @@ export function createBrushMask(width: number, height: number, marks: BrushMark[
   const context = canvas.getContext('2d')
   if (!context) throw new Error('This browser cannot draw the brush selection.')
   for (const mark of marks) {
+    if (mark.mask) {
+      if (mark.mask.length !== width * height) throw new Error('The painted selection does not match the image.')
+      let cached = maskCanvases.get(mark.mask)
+      if (cached && (cached.width !== width || cached.height !== height)) throw new Error('The painted selection does not match the image.')
+      if (!cached) {
+        const maskCanvas = document.createElement('canvas')
+        maskCanvas.width = width
+        maskCanvas.height = height
+        const maskContext = maskCanvas.getContext('2d')
+        if (!maskContext) throw new Error('This browser cannot draw the painted selection.')
+        const image = maskContext.createImageData(width, height)
+        for (let index = 0; index < mark.mask.length; index++) {
+          const offset = index * 4
+          image.data[offset] = image.data[offset + 1] = image.data[offset + 2] = 255
+          image.data[offset + 3] = mark.mask[index]
+        }
+        maskContext.putImageData(image, 0, 0)
+        cached = { width, height, canvas: maskCanvas }
+        maskCanvases.set(mark.mask, cached)
+      }
+      context.globalCompositeOperation = mark.erase ? 'destination-out' : 'source-over'
+      context.drawImage(cached.canvas, 0, 0)
+      continue
+    }
     if (!mark.points.length) continue
     context.globalCompositeOperation = mark.erase ? 'destination-out' : 'source-over'
     context.strokeStyle = '#ffffff'
@@ -41,6 +69,40 @@ export function createBrushMask(width: number, height: number, marks: BrushMark[
     }
   }
   return canvas
+}
+
+export function createBrushLearningMasks(width: number, height: number, marks: BrushMark[]): { additions: Uint8Array; removals: Uint8Array } {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+  if (!context) throw new Error('This browser cannot prepare painted learning data.')
+  for (const mark of marks) {
+    if (mark.generated || !mark.points.length) continue
+    context.strokeStyle = context.fillStyle = mark.erase ? '#000000' : '#ffffff'
+    context.lineWidth = mark.width
+    context.lineCap = 'round'
+    context.lineJoin = 'round'
+    context.beginPath()
+    context.moveTo(mark.points[0].x, mark.points[0].y)
+    if (mark.points.length === 1) {
+      context.arc(mark.points[0].x, mark.points[0].y, mark.width / 2, 0, Math.PI * 2)
+      context.fill()
+    } else {
+      for (const point of mark.points.slice(1)) context.lineTo(point.x, point.y)
+      context.stroke()
+    }
+  }
+  const data = context.getImageData(0, 0, width, height).data
+  const additions = new Uint8Array(width * height)
+  const removals = new Uint8Array(additions.length)
+  for (let index = 0; index < additions.length; index++) {
+    const offset = index * 4
+    if (data[offset + 3] < 128) continue
+    if (data[offset] >= 128) additions[index] = 1
+    else removals[index] = 1
+  }
+  return { additions, removals }
 }
 
 export function extractPaintedCurves(

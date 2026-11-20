@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { compareLearningPixels, initialLearningModel, predictLearningEdits, trainLearningComparison, trainLearningModel } from '../src/lib/learning.ts'
+import { createPaintLearningExample } from '../src/lib/paint-learning.ts'
 
 function example(shift = 0) {
   const width = 120, height = 80
@@ -70,4 +71,29 @@ test('records counts and labelled features for additions, removals and unchanged
   assert.ok(comparison.examples.some((row) => row[2] === 1 && row[9] === 0))
   assert.ok(comparison.examples.every((row) => row.length === 10))
   assert.deepEqual(trainLearningComparison(initialLearningModel(), comparison), trainLearningModel(initialLearningModel(), pixels, corrected))
+})
+
+test('learns only manually painted additions and removals against the automatic curve', async () => {
+  const { pixels } = example()
+  const additions = new Uint8Array(pixels.width * pixels.height)
+  const removals = new Uint8Array(additions.length)
+  for (let x = 20; x < 90; x++) additions[60 * pixels.width + x] = 1
+  for (let y = 20; y < 60; y++) removals[y * pixels.width + 112] = 1
+
+  const result = await createPaintLearningExample(pixels, additions, removals, initialLearningModel())
+
+  assert.equal(result.updated, true)
+  assert.equal(result.model.samples, 1)
+  assert.ok(result.sample.comparison.counts[1] > 0)
+  assert.ok(result.sample.comparison.counts[2] > 0)
+  assert.ok(result.sample.comparison.counts[3] > 0)
+})
+
+test('does not learn from an empty manual paint selection', async () => {
+  const { pixels } = example()
+  const empty = new Uint8Array(pixels.width * pixels.height)
+  const result = await createPaintLearningExample(pixels, empty, empty, initialLearningModel())
+  assert.equal(result.updated, false)
+  assert.equal(result.model.samples, 0)
+  assert.equal(result.sample.comparison, undefined)
 })
