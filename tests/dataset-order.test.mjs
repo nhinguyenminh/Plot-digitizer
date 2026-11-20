@@ -1,6 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { reorderDatasets } from '../src/lib/dataset-order.ts'
+import { datasetRange, reorderDatasets } from '../src/lib/dataset-order.ts'
+
+test('selects an inclusive range in either dataset order direction', () => {
+  const items = ['a', 'b', 'c', 'd'].map((id) => ({ id }))
+  assert.deepEqual(datasetRange(items, 'b', 'd'), ['b', 'c', 'd'])
+  assert.deepEqual(datasetRange(items, 'd', 'b'), ['b', 'c', 'd'])
+  assert.deepEqual(datasetRange(items, 'missing', 'b'), [])
+})
 
 test('moves a dataset before or after a target without changing the others', () => {
   const items = ['a', 'b', 'c', 'd'].map((id) => ({ id }))

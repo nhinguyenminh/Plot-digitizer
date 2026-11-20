@@ -14,10 +14,10 @@ import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, rec
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
 import { axisName, calibrationFromDrafts, calibrationPointsFromGrid, csvHeader, datasetColor, downloadFile, pointToData, traceColor } from './lib/digitizer'
-import { BRUSH_GROUPS, createBrushLearningMasks, createBrushMask, extractBrushGroups } from './lib/painted-region'
+import { BRUSH_GROUPS, createBrushLearningMasks, createBrushMask, dilateBrushMask, extractBrushGroups } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
-import { reorderDatasets } from './lib/dataset-order'
+import { datasetRange, reorderDatasets } from './lib/dataset-order'
 import { drawDatasets } from './lib/dataset-render'
 import { rotationGeometry, rulerCorrection } from './lib/deskew'
 import { createProjectWorkbook } from './lib/excel-export'
@@ -265,6 +265,7 @@ export default function App() {
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
   const processingRun = useRef(0)
   const draggedDatasetId = useRef<string | null>(null)
+  const datasetSelectionAnchor = useRef<string | null>(null)
   const history = useRef<History<ProjectSnapshot> | null>(null)
   const learningStore = useRef<LearningStore | null>(null)
   const pointTrainingBaselines = useRef<Record<string, PixelPoint[]>>({})
@@ -276,7 +277,12 @@ export default function App() {
   const pinnedUrls = useRef(new Set<string>())
   const pointerTransaction = useRef(false)
   const pointerRecorded = useRef(false)
-  const activateDataset = (id: string) => { setActiveId(id); setSelectedDatasetIds(id ? [id] : []); setEditingDatasetName(null) }
+  const activateDataset = (id: string) => {
+    setActiveId(id)
+    setSelectedDatasetIds(id ? [id] : [])
+    datasetSelectionAnchor.current = id || null
+    setEditingDatasetName(null)
+  }
 
   const chartState: ChartState = {
     imageName, imageUrl, sourceImageUrl, processedImageUrl, processedPreviewUrl, upscale, gridGuides, axisGuides,
@@ -630,6 +636,7 @@ export default function App() {
         return
       }
     }
+    if (widths.curve !== reconstructionWidths.curve && drawWidth === reconstructionWidths.curve) setDrawWidth(widths.curve)
     setReconstructionColors(colors); setReconstructionWidths(widths)
   }
 
@@ -781,10 +788,22 @@ export default function App() {
     setMode(selectedKind === 'surge' ? 'surge' : selectedKind === 'choke' ? 'choke' : selectedKind === 'speed' ? 'speed' : selectedKind === 'efficiency' ? 'trace-region' : 'point')
   }
 
-  const selectDataset = (dataset: Dataset, additive: boolean) => {
+  const selectDataset = (dataset: Dataset, additive: boolean, range: boolean) => {
     setEditingDatasetName(null)
+    if (range && !pendingTrace) {
+      const anchorId = datasetSelectionAnchor.current && datasets.some((item) => item.id === datasetSelectionAnchor.current)
+        ? datasetSelectionAnchor.current
+        : activeId
+      const rangeIds = datasetRange(datasets, anchorId, dataset.id)
+      if (rangeIds.length) {
+        setSelectedDatasetIds((current) => additive ? [...new Set([...current, ...rangeIds])] : rangeIds)
+        setActiveId(dataset.id)
+        return
+      }
+    }
     if (additive && !pendingTrace) {
       const selected = selectedDatasetIds.includes(dataset.id)
+      datasetSelectionAnchor.current = dataset.id
       if (selected && selectedDatasetIds.length === 1) return
       const next = selected ? selectedDatasetIds.filter((id) => id !== dataset.id) : [...selectedDatasetIds, dataset.id]
       setSelectedDatasetIds(next)
@@ -1051,8 +1070,9 @@ export default function App() {
       const curveContext = curveLayer.getContext('2d', { willReadFrequently: true })
       if (!curveContext) throw new Error('This browser cannot prepare the automatic paint selection.')
       const curvePixels = curveContext.getImageData(0, 0, curveLayer.width, curveLayer.height).data
-      const mask = new Uint8Array(curveLayer.width * curveLayer.height)
-      for (let index = 0; index < mask.length; index++) mask[index] = curvePixels[index * 4 + 3] >= 64 ? 255 : 0
+      const curveMask = new Uint8Array(curveLayer.width * curveLayer.height)
+      for (let index = 0; index < curveMask.length; index++) curveMask[index] = curvePixels[index * 4 + 3] >= 64 ? 255 : 0
+      const mask = dilateBrushMask(curveMask, curveLayer.width, curveLayer.height, Math.max(4, Math.round(traceBrushWidth / 2)))
       setBrushMarks((current) => [
         { points: [], width: 1, erase: false, group: brushGroup, mask, generated: true },
         ...current.filter((mark) => !mark.generated),
@@ -1669,7 +1689,7 @@ export default function App() {
         axisGuides: project.axisGuides || { horizontal: null, vertical: null }, regularGrid: project.regularGrid ?? false,
         reconstructionColors: project.reconstructionColors || { curve: '#000000', grid: '#000000', axis: '#000000' },
         reconstructionWidths: project.reconstructionWidths || { curve: 1, grid: 1 },
-        eraserWidth: project.eraserWidth ?? ERASER_WIDTH, drawWidth: project.drawWidth ?? 1,
+        eraserWidth: project.eraserWidth ?? ERASER_WIDTH, drawWidth: project.drawWidth ?? project.reconstructionWidths?.curve ?? 1,
         pointMarkerSize: project.pointMarkerSize ?? 100, reconstruction: null, needsProcess: true,
         plotType: project.plotType || 'xy', compressorAxes: project.compressorAxes || defaultCompressorAxes,
         axisUnits: project.axisUnits ?? { x: '', y: '' },
@@ -2008,9 +2028,10 @@ export default function App() {
             </section>}</>}
             {workflowStep === 'digitize' && <>
             {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Optional boundaries</strong><span>Add Surge/Choke to stop speed traces near their sampled points.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
-            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div>{!pendingTrace && selectedDatasetIds.length > 1 && <div className="dataset-bulk-actions"><span>{selectedDatasetIds.length} selected</span><button onClick={mergeSelectedDatasets} title="Merge selected datasets">Merge</button><button className="bulk-delete" onClick={deleteSelectedDatasets} title="Delete selected datasets">Delete</button></div>}<button className="add-small" aria-label="Add dataset" disabled={Boolean(pendingTrace)} onClick={() => addDataset()} title="Add dataset">+</button></div>
+            <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" disabled={Boolean(pendingTrace)} onClick={() => addDataset()} title="Add dataset">+</button></div>
+              {!pendingTrace && <div className="dataset-bulk-actions"><span>{selectedDatasetIds.length ? `${selectedDatasetIds.length} selected` : 'Select multiple'}</span><button disabled={selectedDatasetIds.length < 2} onClick={mergeSelectedDatasets} title="Merge selected datasets">Merge</button><button className="bulk-delete" disabled={selectedDatasetIds.length < 2} onClick={deleteSelectedDatasets} title="Delete selected datasets">Delete</button></div>}
               <label className="range-row"><span>Curve point marker size</span><strong>{pointMarkerSize}%</strong><input aria-label="Curve point marker size" type="range" min="25" max="200" step="25" value={pointMarkerSize} onChange={(event) => setPointMarkerSize(Number(event.target.value))} /></label>
-              <p className="dataset-selection-hint">Drag the handle to reorder. Ctrl-click to merge or delete several.</p>
+              <p className="dataset-selection-hint">Drag the handle to reorder. Shift-click a range or Ctrl/Cmd-click datasets to select several.</p>
               <div className="dataset-list">{datasets.map((dataset) => <div key={dataset.id} className={`dataset-card ${dataset.id === activeId ? 'active' : ''} ${selectedDatasetIds.includes(dataset.id) ? 'multi-selected' : ''} ${datasetDropTarget?.id === dataset.id ? datasetDropTarget.after ? 'drop-after' : 'drop-before' : ''}`}
                 onDragOver={(event) => { if (draggedDatasetId.current && draggedDatasetId.current !== dataset.id) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; const after = event.clientY > event.currentTarget.getBoundingClientRect().top + event.currentTarget.offsetHeight / 2; setDatasetDropTarget((current) => current?.id === dataset.id && current.after === after ? current : { id: dataset.id, after }) } }}
                 onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDatasetDropTarget(null) }}
@@ -2019,7 +2040,7 @@ export default function App() {
                 <div className="dataset-row">
                 {!pendingTrace && <button className="dataset-drag" draggable aria-label={`Reorder ${dataset.name}`} title="Drag to reorder; arrow keys move the dataset" onDragStart={(event) => { draggedDatasetId.current = dataset.id; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', dataset.id) }} onDragEnd={() => { draggedDatasetId.current = null; setDatasetDropTarget(null) }} onKeyDown={(event) => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); moveDataset(dataset.id, event.key === 'ArrowUp' ? -1 : 1) } }}><GripVertical size={14} /></button>}
                 <div className="dataset-entry">
-                  <button className="dataset-select" onClick={(event) => selectDataset(dataset, event.ctrlKey || event.metaKey)} onKeyDown={(event) => { if (event.key === 'Delete' && !pendingTrace && selectedDatasetIds.length > 1) { event.preventDefault(); event.stopPropagation(); deleteSelectedDatasets() } }} aria-label={`Select ${dataset.name}`} aria-pressed={selectedDatasetIds.includes(dataset.id)} />
+                  <button className="dataset-select" onClick={(event) => selectDataset(dataset, event.ctrlKey || event.metaKey, event.shiftKey)} onKeyDown={(event) => { if (event.key === 'Delete' && !pendingTrace && selectedDatasetIds.length > 1) { event.preventDefault(); event.stopPropagation(); deleteSelectedDatasets() } }} aria-label={`Select ${dataset.name}`} aria-pressed={selectedDatasetIds.includes(dataset.id)} />
                   <label className="dataset-swatch" title="Change dataset color"><input aria-label={`Color ${dataset.name}`} type="color" disabled={Boolean(pendingTrace)} value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label>
                   <span className="dataset-meta">
                     <span className="dataset-title">{editingDatasetName?.id === dataset.id ? <form className="dataset-name-editor" onSubmit={(event) => { event.preventDefault(); saveDatasetName() }}><input autoFocus aria-label={`Rename ${dataset.name}`} value={editingDatasetName.value} onChange={(event) => setEditingDatasetName({ id: dataset.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingDatasetName(null) } }} /><button type="submit" title="Confirm name" aria-label="Confirm name"><Check size={12} /></button></form> : <><span className="dataset-name">{dataset.name}</span>{!pendingTrace && <button className="dataset-edit-name" title="Rename dataset" aria-label={`Rename ${dataset.name}`} onClick={() => setEditingDatasetName({ id: dataset.id, value: dataset.name })}><Pencil size={12} /></button>}</>}</span>

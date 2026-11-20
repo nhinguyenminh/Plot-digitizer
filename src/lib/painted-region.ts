@@ -20,6 +20,43 @@ export const BRUSH_GROUPS = [
 
 const maskCanvases = new WeakMap<Uint8Array, { width: number; height: number; canvas: HTMLCanvasElement }>()
 
+export function dilateBrushMask(mask: Uint8Array, width: number, height: number, radius: number): Uint8Array {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0
+    || mask.length !== width * height || !Number.isSafeInteger(radius) || radius < 0) {
+    throw new Error('Invalid painted selection dimensions.')
+  }
+  if (!radius) return mask.slice()
+  const horizontal = new Uint8Array(mask.length)
+  const expanded = new Uint8Array(mask.length)
+  const queue = new Int32Array(Math.max(width, height))
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    let head = 0, tail = 0, next = 0
+    for (let x = 0; x < width; x++) {
+      const last = Math.min(width - 1, x + radius)
+      while (next <= last) {
+        while (tail > head && mask[row + queue[tail - 1]] <= mask[row + next]) tail--
+        queue[tail++] = next++
+      }
+      while (queue[head] < x - radius) head++
+      horizontal[row + x] = mask[row + queue[head]]
+    }
+  }
+  for (let x = 0; x < width; x++) {
+    let head = 0, tail = 0, next = 0
+    for (let y = 0; y < height; y++) {
+      const last = Math.min(height - 1, y + radius)
+      while (next <= last) {
+        while (tail > head && horizontal[queue[tail - 1] * width + x] <= horizontal[next * width + x]) tail--
+        queue[tail++] = next++
+      }
+      while (queue[head] < y - radius) head++
+      expanded[y * width + x] = horizontal[queue[head] * width + x]
+    }
+  }
+  return expanded
+}
+
 export function createBrushMask(width: number, height: number, marks: BrushMark[]): HTMLCanvasElement {
   const canvas = document.createElement('canvas')
   canvas.width = width

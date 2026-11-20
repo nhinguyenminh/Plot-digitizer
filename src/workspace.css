@@ -156,6 +156,7 @@
 .dataset-bulk-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .dataset-bulk-actions span { color: #a7b6ac; font-size: 9px; white-space: nowrap; }
 .dataset-bulk-actions button { padding: 4px 6px; border: 1px solid #547f6d; border-radius: 4px; background: #203c30; color: #c6efde; font-size: 10px; cursor: pointer; }
+.dataset-bulk-actions button:disabled { opacity: .4; cursor: default; }
 .dataset-bulk-actions .bulk-delete { border-color: #6e4642; background: #3a2523; color: #ffc2b8; }
 .dataset-delete {
   display: flex;

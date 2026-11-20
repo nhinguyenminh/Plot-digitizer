@@ -1,6 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractBrushCurves, extractBrushGroups, extractPaintedCurves } from '../src/lib/painted-region.ts'
+import { dilateBrushMask, extractBrushCurves, extractBrushGroups, extractPaintedCurves } from '../src/lib/painted-region.ts'
+
+test('expands painted selections around predicted strokes while clipping to image edges', () => {
+  const mask = new Uint8Array(7 * 5)
+  mask[2 * 7 + 3] = 255
+  const expanded = dilateBrushMask(mask, 7, 5, 2)
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 7; x++) {
+    assert.equal(expanded[y * 7 + x] > 0, x >= 1 && x <= 5 && y <= 4)
+  }
+  assert.throws(() => dilateBrushMask(mask, 7, 5, -1), /Invalid painted selection/)
+})
 
 test('one brush group can create multiple datasets independently of an overlapping group', () => {
   const { image, mask } = fixture()
