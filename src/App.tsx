@@ -967,6 +967,106 @@ export default function App() {
     if (mode === 'trace-region') setBrushMarks((current) => [...current, { points: guide, width: traceBrushWidth, erase: brushErasing, group: brushGroup }])
   }
 
+  const stageTraceCurves = (extraction: ReturnType<typeof extractBrushGroups>, excluded = 0, additionalWarnings: string[] = []) => {
+    let curves = extraction.curves
+    const kind: DatasetKind = plotType === 'compressor' && (activeDataset?.kind === 'speed' || activeDataset?.kind === 'efficiency') ? activeDataset.kind : 'curve'
+    if (kind === 'speed') {
+      const boundaries = datasets.filter((dataset) => (dataset.kind === 'surge' || dataset.kind === 'choke') && dataset.points.length > 1)
+      const meetsBoundary = (candidate: PixelPoint) => boundaries.some((line) => line.points.slice(1).some((end, index) => distanceToSegment(candidate, line.points[index], end) < 10))
+      curves = curves.map((curve) => {
+        const segments: PixelPoint[][] = [[]]
+        for (const point of curve.points) {
+          if (meetsBoundary(point)) {
+            if (segments[segments.length - 1].length) segments.push([])
+          } else segments[segments.length - 1].push(point)
+        }
+        return { ...curve, points: segments.sort((a, b) => b.length - a.length)[0] }
+      }).filter((curve) => {
+        if (curve.points.length >= 2) return true
+        excluded++
+        return false
+      })
+    }
+    if (!curves.length) {
+      showNotice(excluded ? 'No speed curves remain after applying the surge and choke boundaries.' : 'No curves found in the painted region. Check the selection, color, and tolerance.', 'error')
+      return
+    }
+    const next: Dataset[] = []
+    for (const curve of curves) {
+      const index = next.length
+      const dataset = defaultDataset(datasets.length + index + 1, kind, [...datasets, ...next])
+      dataset.name = kind === 'speed' ? `Speed line ${datasets.filter((item) => item.kind === kind).length + index + 1}`
+        : kind === 'efficiency' ? `Efficiency contour ${datasets.filter((item) => item.kind === kind).length + index + 1}`
+          : `Trace ${datasets.filter((item) => item.kind === kind).length + index + 1}`
+      dataset.name += ` (${curve.group})`
+      dataset.points = curve.points
+      next.push(dataset)
+    }
+    setDatasets((current) => [...current, ...next])
+    setPendingTrace({
+      ids: next.map((dataset) => dataset.id), previousActiveId: activeId,
+      generated: Object.fromEntries(next.map((dataset) => [dataset.id, dataset.points.map((point) => ({ ...point }))])),
+      warnings: [...extraction.warnings, ...additionalWarnings, ...(!showOriginalPreview && processedImageUrl && !(reconstruction && !needsProcess) ? ['Using the composite image; process it again to separate the curve layer from the grid.'] : []), ...(excluded ? [`${excluded} speed curve candidates were removed by the boundaries.`] : [])],
+    })
+    activateDataset(next[0].id)
+    setMode('select')
+    showNotice(`Created ${next.length} curve${next.length === 1 ? '' : 's'}.${excluded ? ` ${excluded} removed by boundaries.` : ''} Review before confirming.`)
+  }
+
+  const autoPaintWithModel = async () => {
+    if (!sourceImageUrl || !imagePrepared || loading || !reconstruction || needsProcess
+      || !learningState?.enabled || learningState.model.samples < 1) return
+    const run = processingRun.current
+    setLoading(true)
+    try {
+      const image = new Image()
+      image.src = sourceImageUrl
+      await image.decode()
+      if (run !== processingRun.current) return
+      if (image.naturalWidth !== reconstruction.width || image.naturalHeight !== reconstruction.height) {
+        throw new Error('The source image no longer matches the processed plot.')
+      }
+      if (image.naturalWidth * image.naturalHeight > 4_000_000) throw new Error('Use an image below 4 megapixels for automatic point extraction.')
+      const sourceCanvas = document.createElement('canvas')
+      sourceCanvas.width = image.naturalWidth; sourceCanvas.height = image.naturalHeight
+      const sourceContext = sourceCanvas.getContext('2d', { willReadFrequently: true })
+      if (!sourceContext) throw new Error('This browser cannot read the source plot image.')
+      sourceContext.drawImage(image, 0, 0)
+      const automatic = renderReconstructionCurveLayer({ ...reconstruction, learnedCorrections: [] }, [], reconstructionWidths)
+      const automaticContext = automatic.getContext('2d', { willReadFrequently: true })
+      if (!automaticContext) throw new Error('This browser cannot read the automatic curve layer.')
+      const prediction = predictLearningEdits(learningState.model, {
+        width: automatic.width, height: automatic.height,
+        source: sourceContext.getImageData(0, 0, automatic.width, automatic.height).data,
+        automatic: automaticContext.getImageData(0, 0, automatic.width, automatic.height).data,
+        region: reconstruction.region,
+      })
+      const learnedCorrections = learningMasksToCorrections(prediction.add, prediction.erase, automatic.width, automatic.height)
+      const curveLayer = renderReconstructionCurveLayer(
+        { ...reconstruction, learnedCorrections: [] },
+        [...corrections, ...learnedCorrections],
+        reconstructionWidths,
+      )
+      const selection = document.createElement('canvas')
+      selection.width = curveLayer.width; selection.height = curveLayer.height
+      const selectionContext = selection.getContext('2d', { willReadFrequently: true })
+      const curveContext = curveLayer.getContext('2d', { willReadFrequently: true })
+      if (!selectionContext || !curveContext) throw new Error('This browser cannot prepare the automatic curve selection.')
+      selectionContext.fillStyle = '#ffffff'
+      selectionContext.fillRect(reconstruction.region.x, reconstruction.region.y, reconstruction.region.width, reconstruction.region.height)
+      const extraction = extractBrushGroups(
+        curveContext.getImageData(0, 0, curveLayer.width, curveLayer.height),
+        [{ name: 'ML', mask: selectionContext.getImageData(0, 0, selection.width, selection.height).data }],
+        learnedSampleStep, tolerance, [0, 102, 255], true,
+      )
+      stageTraceCurves(extraction, 0, [`Local ML model applied ${prediction.changed} pixel correction${prediction.changed === 1 ? '' : 's'} using ${learningState.model.samples} training update${learningState.model.samples === 1 ? '' : 's'}.`])
+    } catch (error) {
+      if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'The local ML model could not analyze the plot.', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const autoPaintedPoints = async () => {
     const traceImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
     if (!traceImageUrl || !imagePrepared || !brushMarks.length || loading) return
@@ -998,50 +1098,7 @@ export default function App() {
         ? [1, 3, 5].map((index) => parseInt(reconstructionColors.curve.slice(index, index + 2), 16)) as [number, number, number]
         : undefined
       const extraction = extractBrushGroups(context.getImageData(0, 0, canvas.width, canvas.height), groups, learnedSampleStep, tolerance, color, Boolean(isolatedCurveLayer))
-      let curves = extraction.curves
-      const kind: DatasetKind = plotType === 'compressor' && (activeDataset?.kind === 'speed' || activeDataset?.kind === 'efficiency') ? activeDataset.kind : 'curve'
-      let excluded = 0
-      if (kind === 'speed') {
-        const boundaries = datasets.filter((dataset) => (dataset.kind === 'surge' || dataset.kind === 'choke') && dataset.points.length > 1)
-        const meetsBoundary = (candidate: PixelPoint) => boundaries.some((line) => line.points.slice(1).some((end, index) => distanceToSegment(candidate, line.points[index], end) < 10))
-        curves = curves.map((curve) => {
-          const segments: PixelPoint[][] = [[]]
-          for (const point of curve.points) {
-            if (meetsBoundary(point)) {
-              if (segments[segments.length - 1].length) segments.push([])
-            } else segments[segments.length - 1].push(point)
-          }
-          return { ...curve, points: segments.sort((a, b) => b.length - a.length)[0] }
-        }).filter((curve) => {
-          if (curve.points.length >= 2) return true
-          excluded++
-          return false
-        })
-      }
-      if (!curves.length) {
-        showNotice(excluded ? 'No speed curves remain after applying the surge and choke boundaries.' : 'No curves found in the painted region. Check the selection, color, and tolerance.', 'error')
-        return
-      }
-      const next: Dataset[] = []
-      for (const curve of curves) {
-        const index = next.length
-        const dataset = defaultDataset(datasets.length + index + 1, kind, [...datasets, ...next])
-        dataset.name = kind === 'speed' ? `Speed line ${datasets.filter((item) => item.kind === kind).length + index + 1}`
-          : kind === 'efficiency' ? `Efficiency contour ${datasets.filter((item) => item.kind === kind).length + index + 1}`
-            : `Trace ${datasets.filter((item) => item.kind === kind).length + index + 1}`
-        dataset.name += ` (${curve.group})`
-        dataset.points = curve.points
-        next.push(dataset)
-      }
-      setDatasets((current) => [...current, ...next])
-      setPendingTrace({
-        ids: next.map((dataset) => dataset.id), previousActiveId: activeId,
-        generated: Object.fromEntries(next.map((dataset) => [dataset.id, dataset.points.map((point) => ({ ...point }))])),
-        warnings: [...extraction.warnings, ...(!showOriginalPreview && processedImageUrl && !isolatedCurveLayer ? ['Using the composite image; process it again to separate the curve layer from the grid.'] : []), ...(excluded ? [`${excluded} speed curve candidates were removed by the boundaries.`] : [])],
-      })
-      activateDataset(next[0].id)
-      setMode('select')
-      showNotice(`Created ${next.length} curve${next.length === 1 ? '' : 's'}.${excluded ? ` ${excluded} removed by boundaries.` : ''} Review before confirming.`)
+      stageTraceCurves(extraction)
     } catch (error) {
       if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Image could not be analyzed in this browser.', 'error')
     } finally {
@@ -1697,9 +1754,9 @@ export default function App() {
             <button className={`tool-button ${mode === 'calibrate-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'calibrate-edit' ? 'select' : 'calibrate-edit')} disabled={!imagePrepared || xAxis.points.length + yAxis.points.length === 0}><span className="tool-icon"><MoveUpRight size={16} /></span><span>Modify calibration</span><kbd>C</kbd></button>
             </>}
             {workflowStep === 'digitize' && <><div className="tool-group-label tool-gap">DIGITIZE</div>
+            <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
-            <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className="tool-button" onClick={retraceActiveDataset} disabled={!imagePrepared || loading || activePoints < 2}><span className="tool-icon"><ScanSearch size={16} /></span><span>Retrace edited curve</span></button>
             <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => setMode('measure')} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
@@ -1766,7 +1823,7 @@ export default function App() {
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves, then press Auto point.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Brush curves and use Auto point, or run Auto paint (ML) across the processed plot.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point. Use Modify curve points to adjust existing points.'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && workflowStep === 'digitize' && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -1933,7 +1990,7 @@ export default function App() {
               <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" disabled={mode === 'trace-region' && (showOriginalPreview || !processedImageUrl || Boolean(reconstruction && !needsProcess))} value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
               <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="60" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
               <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
-              {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div><div className="prep-actions"><button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>Auto point</button><button className="prep-compare" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button></div></>}
+              {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div><div className="prep-actions trace-actions"><button className="prep-compare" disabled={!imagePrepared || !processedImageUrl || !reconstruction || needsProcess || !learningState?.enabled || (learningState?.model.samples ?? 0) < 1 || loading} title="Requires a processed image and an enabled, trained local curve model" onClick={() => { void autoPaintWithModel() }}><Sparkles size={13} /> Auto paint (ML)</button><button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>Auto point</button><button className="prep-compare clear-brushes" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button></div><div className="trace-hint">Auto paint requires a processed image and an enabled local model trained from confirmed curve corrections.</div></>}
               <div className="trace-hint"><Sparkles size={13} /> Each color is extracted separately, even where brushes overlap. Short spacing anomalies are filtered while sharp bends are retained. Auto point uses the curve layer when available; inspect crossings, gaps and every result. {pointSpacingModel.samples > 0 && `Local edits learned a ${Math.round((pointSpacingModel.factor - 1) * 100)}% sparser sampling step (${learnedSampleStep} px).`}</div>
             </section> : null}
             <div className="panel-footer"><span className="footer-stat"><Crosshair size={13} /> {totalPoints} points</span><span className="footer-stat"><Layers size={13} /> {datasets.length} datasets</span></div>
