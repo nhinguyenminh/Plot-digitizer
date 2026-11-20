@@ -1,6 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { calibrationFromDrafts, calibrateFromIntersections, pointToData } from '../src/lib/digitizer.ts'
+import { calibrationFromDrafts, calibrationPointsFromGrid, calibrateFromIntersections, pointToData } from '../src/lib/digitizer.ts'
+
+test('detected grid calibration starts at the lower left and supports either Y direction', () => {
+  const points = calibrationPointsFromGrid({ verticalLines: [10, 50, 90], horizontalLines: [20, 60, 100], confidence: 1 })
+  assert.deepEqual(points.x.map(({ x, y }) => ({ x, y })), [{ x: 10, y: 100 }, { x: 90, y: 100 }])
+  assert.deepEqual(points.y.map(({ x, y }) => ({ x, y })), [{ x: 10, y: 100 }, { x: 10, y: 20 }])
+  const x = calibrationFromDrafts({ points: points.x, scale: 'linear' }, ['0', '4000'], 'x')
+  const y = calibrationFromDrafts({ points: points.y, scale: 'linear' }, ['0', '3000'], 'y')
+  assert.deepEqual(pointToData({ x: 50, y: 60 }, x, y), { x: 2000, y: 1500 })
+  const reversedY = calibrationFromDrafts(y, ['3000', '0'], 'y')
+  assert.equal(pointToData({ x: 50, y: 80 }, x, reversedY).y, 2250)
+})
 
 test('two intersections calibrate both axes in click order', () => {
   const result = calibrateFromIntersections(

@@ -13,7 +13,7 @@ import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-pro
 import { ERASER_MAX_WIDTH, ERASER_MIN_WIDTH, ERASER_WIDTH, reconstructImage, reconstructionDimensions, renderReconstruction, renderReconstructionCurveLayer } from './lib/reconstruct'
 import type { UpscaleSetting } from './lib/reconstruct'
 import type { AxisGuides, Correction, CorrectionLayer, PlotRegion, Reconstruction, ReconstructionColors, ReconstructionWidths } from './lib/reconstruct'
-import { calibrationFromDrafts, downloadFile, pointToData, traceColor } from './lib/digitizer'
+import { calibrationFromDrafts, calibrationPointsFromGrid, downloadFile, pointToData, traceColor } from './lib/digitizer'
 import { createBrushMask, extractBrushCurves } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
@@ -705,24 +705,9 @@ export default function App() {
         return
       }
 
-      const left = detected.verticalLines[0]
-      const right = detected.verticalLines[detected.verticalLines.length - 1]
-      const top = detected.horizontalLines[0]
-      const bottom = detected.horizontalLines[detected.horizontalLines.length - 1]
-      setXAxis({
-        ...xAxis,
-        points: [
-          { x: left, y: bottom, value: 1 },
-          { x: right, y: bottom, value: 2 },
-        ],
-      })
-      setYAxis({
-        ...yAxis,
-        points: [
-          { x: left, y: top, value: 1 },
-          { x: left, y: bottom, value: 2 },
-        ],
-      })
+      const points = calibrationPointsFromGrid(detected)
+      setXAxis((current) => ({ ...current, points: points.x }))
+      setYAxis((current) => ({ ...current, points: points.y }))
       setCalibrationConfirmed(false)
       setCalibrationDrafts({ x: ['', ''], y: ['', ''] })
       setGridDetection(detected)
@@ -1719,6 +1704,11 @@ export default function App() {
             {workflowStep === 'calibration' && <><section className="panel-section calibration-section"><div className="section-heading"><div><span className="section-kicker">STEP 02</span><h2>Axis calibration</h2></div><span className="calibration-state">{calibrationPhase === 'points' ? '1 / 2' : '2 / 2'}</span></div>
               {calibrationPhase === 'points' ? <>
                 <p className="section-copy"><strong>1. Select reference points</strong><br />Select at least two points on each axis. Drag markers to adjust them, then confirm their positions.</p>
+                <button className="axis-detect-button" onClick={() => { void calibrateFromDetectedGrid() }} disabled={gridDetecting}>
+                  <ScanSearch size={14} /> {gridDetecting ? 'Detecting grid…' : 'Auto-detect calibration points'}
+                </button>
+                <p className="axis-detect-note">Uses the outermost grid lines: X1 left, X2 right, Y1 bottom, Y2 top. Check the markers and enter their actual values.</p>
+                {gridDetection && <p className="axis-detect-note">Found {gridDetection.verticalLines.length} vertical × {gridDetection.horizontalLines.length} horizontal lines. Check the markers.</p>}
                 <div className="four-point-calibration">
                   <strong>Guided selection</strong>
                   <p>Click X1, X2, Y1 and Y2 in order.</p>
@@ -1734,11 +1724,6 @@ export default function App() {
                     setXAxis((current) => ({ ...current, points: [] })); setYAxis((current) => ({ ...current, points: [] }))
                     setCalibrationDrafts({ x: [], y: [] }); setFourPointPixels([]); setCalibrationConfirmed(false); setMode('calibrate-intersections')
                   }}>Select 2 intersections</button>
-                  <button className="axis-detect-button" onClick={() => { void calibrateFromDetectedGrid() }} disabled={gridDetecting}>
-                    <ScanSearch size={14} /> {gridDetecting ? 'Detecting grid…' : 'Detect grid points'}
-                  </button>
-                  <p className="axis-detect-note">Uses the outermost grid lines: X1 left, X2 right, Y1 top, Y2 bottom.</p>
-                  {gridDetection && <p className="axis-detect-note">Found {gridDetection.verticalLines.length} vertical × {gridDetection.horizontalLines.length} horizontal lines. Check the markers.</p>}
                   <button className="axis-detect-button" disabled={gridDetecting} onClick={() => { void detectAxes() }}><ScanSearch size={14} /> Auto-detect axes & origin</button>
                   {axisDetection && <p className="axis-detect-note">Intersection near {Math.round(axisDetection.intersection.x)}, {Math.round(axisDetection.intersection.y)} px · verify against the scan.</p>}
                 </details>

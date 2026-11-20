@@ -1,3 +1,5 @@
+import type { DetectedPlotGrid } from './image-processing'
+
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
 export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase' | 'prep-heal' | 'prep-straighten'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
@@ -18,6 +20,18 @@ export interface Dataset {
   efficiencyValue?: number
 }
 export interface AxisCalibration { points: CalPoint[]; scale: ScaleType }
+
+export function calibrationPointsFromGrid(grid: DetectedPlotGrid): { x: CalPoint[]; y: CalPoint[] } {
+  if (grid.verticalLines.length < 2 || grid.horizontalLines.length < 2) throw new Error('At least two grid lines are required on each axis.')
+  const left = grid.verticalLines[0]
+  const right = grid.verticalLines[grid.verticalLines.length - 1]
+  const top = grid.horizontalLines[0]
+  const bottom = grid.horizontalLines[grid.horizontalLines.length - 1]
+  return {
+    x: [{ x: left, y: bottom, value: 1 }, { x: right, y: bottom, value: 2 }],
+    y: [{ x: left, y: bottom, value: 1 }, { x: left, y: top, value: 2 }],
+  }
+}
 
 export function calibrationFromDrafts(axis: AxisCalibration, drafts: string[], coordinate: 'x' | 'y'): AxisCalibration {
   if (axis.points.length < 2 || drafts.length !== axis.points.length) throw new Error('Choose at least two reference points on each axis.')
