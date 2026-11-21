@@ -1,6 +1,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { datasetRange, reorderDatasets } from '../src/lib/dataset-order.ts'
+import { datasetRange, reorderDatasets, updatePendingTrace } from '../src/lib/dataset-order.ts'
+
+test('review merge and deletion retain only remaining candidates and correct point baselines', () => {
+  const pending = { ids: ['a', 'b', 'c'], previousActiveId: 'old', warnings: [], generated: {
+    a: [{ x: 0, y: 1 }], b: [{ x: 2, y: 3 }], c: [{ x: 4, y: 5 }],
+  } }
+  const merged = { id: 'b', points: [{ x: 0, y: 1 }, { x: 2, y: 3 }] }
+  const updated = updatePendingTrace(pending, ['a', 'b'], merged)
+  assert.deepEqual(updated.ids, ['b', 'c'])
+  assert.deepEqual(updated.generated, { b: merged.points, c: pending.generated.c })
+  assert.notEqual(updated.generated.b, merged.points)
+  assert.equal(updatePendingTrace(updated, ['b', 'c']), null)
+  assert.deepEqual(updatePendingTrace(updated, ['b']).ids, ['c'])
+  assert.throws(() => updatePendingTrace(pending, ['old']), /Only new datasets/)
+  assert.deepEqual(pending.ids, ['a', 'b', 'c'])
+})
 
 test('selects an inclusive range in either dataset order direction', () => {
   const items = ['a', 'b', 'c', 'd'].map((id) => ({ id }))

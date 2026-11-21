@@ -1,4 +1,23 @@
-import type { Dataset } from './digitizer'
+import type { Dataset, PixelPoint } from './digitizer'
+
+export interface PendingTrace {
+  ids: string[]
+  previousActiveId: string
+  warnings: string[]
+  generated: Record<string, PixelPoint[]>
+}
+
+export function updatePendingTrace(pending: PendingTrace, removedIds: string[], merged?: Dataset): PendingTrace | null {
+  if (removedIds.some((id) => !pending.ids.includes(id)) || (merged && !removedIds.includes(merged.id))) {
+    throw new Error('Only new datasets can be changed during review.')
+  }
+  const ids = pending.ids.filter((id) => !removedIds.includes(id) || id === merged?.id)
+  if (!ids.length) return null
+  const generated = { ...pending.generated }
+  for (const id of removedIds) delete generated[id]
+  if (merged) generated[merged.id] = merged.points.map((point) => ({ ...point }))
+  return { ...pending, ids, generated }
+}
 
 export function datasetRange(datasets: Dataset[], startId: string, endId: string): string[] {
   const start = datasets.findIndex((dataset) => dataset.id === startId)
