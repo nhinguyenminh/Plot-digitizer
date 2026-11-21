@@ -19,16 +19,32 @@
   background: #101715;
   border-bottom: 1px solid #293630;
 }
-.chart-tab-list { display: flex; gap: 4px; min-width: 0; overflow-x: auto; }
-.chart-tab-item { display: flex; align-items: center; flex: none; max-width: 240px; border: 1px solid #303d37; border-bottom: 0; border-radius: 6px 6px 0 0; background: #18221e; }
+.chart-tab-list { display: flex; gap: 3px; flex: 1; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; }
+.chart-tab-item { display: flex; align-items: center; flex: none; max-width: 160px; border: 1px solid #303d37; border-bottom: 0; border-radius: 6px 6px 0 0; background: #18221e; }
 .chart-tab-item.active { background: #28443a; border-color: #51d6b3; }
 .chart-tab-item button, .chart-add { border: 0; background: transparent; color: #d7e5dc; cursor: pointer; }
-.chart-tab-item button[role=tab] { max-width: 160px; padding: 8px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chart-tab-action { padding: 5px; display: grid; place-items: center; }
+.chart-tab-item button[role=tab] { max-width: 96px; padding: 5px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-tab-action { padding: 3px; display: grid; place-items: center; }
 .chart-tab-item button:disabled, .chart-add:disabled { opacity: .35; cursor: default; }
 .chart-tab-item form { display: flex; align-items: center; padding: 3px; }
-.chart-tab-item input { width: 140px; padding: 4px; border: 1px solid #6cbca0; border-radius: 3px; background: #141917; color: #e7ece9; }
+.chart-tab-item input { width: 96px; padding: 4px; border: 1px solid #6cbca0; border-radius: 3px; background: #141917; color: #e7ece9; }
 .chart-add { flex: none; padding: 0 10px; font-size: 20px; }
+
+.cloud-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px; background: #000a; }
+.cloud-dialog { width: min(460px, 100%); max-height: 85vh; overflow-y: auto; padding: 18px; border: 1px solid #53675c; border-radius: 9px; background: #19221e; color: #e7ece9; box-shadow: 0 10px 30px #0009; }
+.cloud-heading { display: flex; align-items: center; justify-content: space-between; }
+.cloud-heading h2, .cloud-dialog h3 { margin: 0; }
+.cloud-heading button { font-size: 22px; }
+.cloud-dialog p { margin: 12px 0; }
+.cloud-dialog label { display: grid; gap: 4px; margin: 10px 0; }
+.cloud-dialog input { width: 100%; padding: 8px; border: 1px solid #53675c; border-radius: 4px; background: #101715; color: inherit; }
+.cloud-dialog button { border: 1px solid #53675c; border-radius: 4px; padding: 7px 10px; background: #28443a; color: inherit; cursor: pointer; }
+.cloud-dialog button:disabled { opacity: .5; cursor: default; }
+.cloud-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.cloud-list { display: grid; gap: 5px; max-height: 40vh; margin-top: 8px; overflow-y: auto; }
+.cloud-list button { display: flex; justify-content: space-between; gap: 12px; text-align: left; }
+.cloud-list small { flex: none; color: #a3b6aa; }
+.cloud-message { overflow-wrap: anywhere; }
 
 .left-rail, .right-panel, .center-workspace {
   min-height: 0;

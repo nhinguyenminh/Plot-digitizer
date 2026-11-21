@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
+import CloudProjects from './components/CloudProjects'
 import type { RotationPreview } from './components/DeskewPanel'
 import { detectPlotAxes, detectPlotGrid } from './lib/image-processing'
 import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-processing'
@@ -258,9 +259,12 @@ export default function App() {
   const [charts, setCharts] = useState<ChartRecord[]>(() => [{ id: crypto.randomUUID(), name: 'Chart 1', state: blankChart() }])
   const [activeChartId, setActiveChartId] = useState(() => charts[0].id)
   const [editingChartName, setEditingChartName] = useState<{ id: string; value: string } | null>(null)
+  const [cloudOpen, setCloudOpen] = useState(false)
+  const [cloudResetKey, setCloudResetKey] = useState(0)
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
+  const chartTabList = useRef<HTMLDivElement>(null)
   const exportMenu = useRef<HTMLDivElement>(null)
   const exportMenuButton = useRef<HTMLButtonElement>(null)
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
@@ -352,6 +356,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    chartTabList.current?.querySelector('[role="tab"][aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeChartId])
+
+  useEffect(() => {
     const finish = () => { pointerTransaction.current = false; pointerRecorded.current = false }
     window.addEventListener('pointerup', finish)
     window.addEventListener('pointercancel', finish)
@@ -377,7 +385,7 @@ export default function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if (pendingTrace) return
+      if (pendingTrace || cloudOpen) return
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.metaKey || event.ctrlKey || event.altKey) return
       if (event.key === 'Escape') setMode('select')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'p') setMode('point')
@@ -387,7 +395,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking])
+  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking, cloudOpen])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
   const learnedSampleStep = Math.min(60, Math.max(1, Math.round(sampleStep * pointSpacingModel.factor)))
@@ -459,7 +467,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
+      if (cloudOpen || !(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
         || (target instanceof HTMLElement && target.isContentEditable)) return
       const key = event.key.toLowerCase()
@@ -535,6 +543,7 @@ export default function App() {
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
+      if (cloudOpen) return
       const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.type.startsWith('image/'))
       const file = imageItem?.getAsFile()
       if (!file) return
@@ -543,7 +552,7 @@ export default function App() {
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [])
+  }, [cloudOpen])
 
   const processImage = async () => {
     if (!sourceImageUrl || preprocessing || learningWorking) return
@@ -1584,9 +1593,10 @@ export default function App() {
   }
 
 
-  const exportProject = async () => {
-    if (rotationPreview || preprocessing || loading || gridDetecting || exporting || pendingTrace || learningWorking) return
+  const exportProject = async (cloud?: { name: string; save: (project: object) => Promise<void> }): Promise<boolean> => {
+    if (rotationPreview || preprocessing || loading || gridDetecting || exporting || pendingTrace || learningWorking) return false
     const snapshot = currentProject()
+    if (cloud) snapshot.name = cloud.name
     for (const { state } of snapshot.charts) {
       for (const url of [state.imageUrl, state.sourceImageUrl]) if (url?.startsWith('blob:')) pinnedUrls.current.add(url)
     }
@@ -1623,7 +1633,12 @@ export default function App() {
         } })
       }
       const project = { version: 2, name: snapshot.name, activeChartId: snapshot.activeId, charts: savedCharts }
-      downloadFile(`${snapshot.name.toLowerCase().replace(/\s+/g, '-') || 'project'}-project.json`, JSON.stringify(project), 'application/json')
+      if (cloud) {
+        await cloud.save(project)
+        setProjectName(snapshot.name)
+      } else {
+        downloadFile(`${snapshot.name.toLowerCase().replace(/\s+/g, '-') || 'project'}-project.json`, JSON.stringify(project), 'application/json')
+      }
       if (spacingBaselineIds.length && learningState?.enabled) {
         try {
           if (spacingUpdate && spacingUpdate.samples > pointSpacingModel.samples) {
@@ -1651,24 +1666,27 @@ export default function App() {
           showNotice(error instanceof Error ? `Project saved, but point-spacing learning could not be saved: ${error.message}` : 'Project saved, but point-spacing learning could not be saved.', 'error')
         }
       }
+      return true
     } catch (error) {
+      if (cloud) throw error
       showNotice(error instanceof Error ? error.message : 'Unable to save the project.', 'error')
+      return false
     } finally {
       pinnedUrls.current.clear(); setExporting(false)
     }
   }
 
 
-  const importProject = async (file?: File) => {
-    if (!file || projectBusy) return
+  const importProject = async (file?: File, fromCloud = false): Promise<boolean> => {
+    if (!file || projectBusy) return false
     const run = ++processingRun.current
     const before = currentProject()
     try {
       const fileData = JSON.parse(await file.text())
-      if (run !== processingRun.current) return
+      if (run !== processingRun.current) return false
       if (latestProject.current && !sameProjectContent(before, latestProject.current)) {
         showNotice('The project changed while the file was opening. Please open it again.', 'error')
-        return
+        return false
       }
       const parseChart = (project: typeof fileData): ChartState => {
       if (!project || !Array.isArray(project.datasets)) throw new Error('Invalid chart data')
@@ -1777,8 +1795,14 @@ export default function App() {
         snapshot = { name: fileData.name, activeId: fileData.activeChartId, charts: imported }
       } else throw new Error('Unsupported project file')
       applyProject(snapshot)
+      if (!fromCloud) setCloudResetKey((key) => key + 1)
       showNotice('Project opened. Saved image processing, calibration and datasets were restored.')
-    } catch (error) { showNotice(error instanceof Error ? `Could not open project: ${error.message}` : 'That project file is invalid or unsupported.', 'error') }
+      return true
+    } catch (error) {
+      if (fromCloud) throw error
+      showNotice(error instanceof Error ? `Could not open project: ${error.message}` : 'That project file is invalid or unsupported.', 'error')
+      return false
+    }
   }
 
   const addCalibrationPoint = (axis: 'x' | 'y') => setMode(axis === 'x' ? 'calibrate-x' : 'calibrate-y')
@@ -1841,7 +1865,8 @@ export default function App() {
         <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
         <div className="top-actions" inert={Boolean(rotationPreview)}>
           <button className="top-quiet" disabled={projectBusy} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button>
-          <button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={exportProject}><ArrowDownToLine size={15} /> Save project</button>
+          <button className="top-quiet" disabled={projectBusy} onClick={() => setCloudOpen(true)}><FolderOpen size={15} /> Cloud projects</button>
+          <button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save project</button>
           <div className="export-control" ref={exportMenu}>
             <button className="export-top export-main" onClick={() => { setExportMenuOpen(false); void exportExcel() }} disabled={projectBusy}><FileSpreadsheet size={15} /> Export Excel</button>
             <button ref={exportMenuButton} className="export-top export-toggle" aria-label="Other export formats" aria-expanded={exportMenuOpen} aria-controls="export-formats" disabled={projectBusy} onClick={() => setExportMenuOpen((open) => !open)}><ChevronDown size={15} /></button>
@@ -1854,11 +1879,11 @@ export default function App() {
       </header>
 
       <nav className="chart-tabs" aria-label="Project charts">
-        <div className="chart-tab-list" role="tablist" aria-label="Charts">
+        <div ref={chartTabList} className="chart-tab-list" role="tablist" aria-label="Charts">
           {charts.map((chart) => <div key={chart.id} className={`chart-tab-item ${chart.id === activeChartId ? 'active' : ''}`}>
             {editingChartName?.id === chart.id
-              ? <form onSubmit={(event) => { event.preventDefault(); saveChartName() }}><input autoFocus aria-label={`Rename chart ${chart.name}`} value={editingChartName.value} onChange={(event) => setEditingChartName({ id: chart.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingChartName(null) } }} /><button type="submit" aria-label="Confirm chart name"><Check size={13} /></button></form>
-              : <><button role="tab" aria-selected={chart.id === activeChartId} disabled={projectBusy} onClick={() => switchChart(chart.id)}>{chart.name}</button><button className="chart-tab-action" disabled={projectBusy} title="Rename chart" aria-label={`Rename chart ${chart.name}`} onClick={() => setEditingChartName({ id: chart.id, value: chart.name })}><Pencil size={12} /></button><button className="chart-tab-action" disabled={projectBusy || charts.length < 2} title="Delete chart" aria-label={`Delete chart ${chart.name}`} onClick={() => deleteChart(chart.id)}><Trash2 size={12} /></button></>}
+              ? <form onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) saveChartName() }} onSubmit={(event) => { event.preventDefault(); saveChartName() }}><input autoFocus aria-label={`Rename chart ${chart.name}`} value={editingChartName.value} onChange={(event) => setEditingChartName({ id: chart.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingChartName(null) } }} /><button type="submit" aria-label="Confirm chart name"><Check size={13} /></button></form>
+              : <><button role="tab" title={chart.name} aria-selected={chart.id === activeChartId} disabled={projectBusy} onClick={() => switchChart(chart.id)}>{chart.name}</button><button className="chart-tab-action" disabled={projectBusy} title="Rename chart" aria-label={`Rename chart ${chart.name}`} onClick={() => setEditingChartName({ id: chart.id, value: chart.name })}><Pencil size={12} /></button><button className="chart-tab-action" disabled={projectBusy || charts.length < 2} title="Delete chart" aria-label={`Delete chart ${chart.name}`} onClick={() => deleteChart(chart.id)}><Trash2 size={12} /></button></>}
           </div>)}
         </div>
         <button className="chart-add" onClick={addChart} disabled={projectBusy} aria-label="Add chart" title="Add chart">+</button>
@@ -1902,7 +1927,7 @@ export default function App() {
             <button className="tool-button" onClick={() => imageInput.current?.click()}><span className="tool-icon"><ImagePlus size={16} /></span><span>Replace image</span></button>
             <div className="transform-grid"><button title="Rotate left" aria-label="Rotate left" onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /></button><button title="Rotate right" aria-label="Rotate right" onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /></button><button title="Flip horizontal" aria-label="Flip horizontal" onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /></button><button title="Flip vertical" aria-label="Flip vertical" onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /></button></div>
           </div>
-          <div className="rail-bottom"><span className="connection-indicator" /><span>{isDesktop ? 'Learning stays on this device' : 'Images stay on this device'}</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
+          <div className="rail-bottom"><span className="connection-indicator" /><span>{isDesktop ? 'Learning stays on this device' : 'Cloud saves include images'}</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
         </aside>
 
         <section className="center-workspace" aria-label="Plot workspace">
@@ -2097,7 +2122,7 @@ export default function App() {
                   <button className="dataset-select" onClick={(event) => selectDataset(dataset, event.ctrlKey || event.metaKey, event.shiftKey)} onKeyDown={(event) => { if (event.key === 'Delete' && selectedDatasetIds.length > 1) { event.preventDefault(); event.stopPropagation(); deleteSelectedDatasets() } }} aria-label={`Select ${dataset.name}`} aria-pressed={selectedDatasetIds.includes(dataset.id)} />
                   <label className="dataset-swatch" title="Change dataset color"><input aria-label={`Color ${dataset.name}`} type="color" disabled={Boolean(pendingTrace)} value={dataset.color} onChange={(event) => updateDataset(dataset.id, (current) => ({ ...current, color: event.target.value }))} /><span style={{ backgroundColor: dataset.color }} /></label>
                   <span className="dataset-meta">
-                    <span className="dataset-title">{editingDatasetName?.id === dataset.id ? <form className="dataset-name-editor" onSubmit={(event) => { event.preventDefault(); saveDatasetName() }}><input autoFocus aria-label={`Rename ${dataset.name}`} value={editingDatasetName.value} onChange={(event) => setEditingDatasetName({ id: dataset.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingDatasetName(null) } }} /><button type="submit" title="Confirm name" aria-label="Confirm name"><Check size={12} /></button></form> : <><span className="dataset-name">{dataset.name}</span>{!pendingTrace && <button className="dataset-edit-name" title="Rename dataset" aria-label={`Rename ${dataset.name}`} onClick={() => setEditingDatasetName({ id: dataset.id, value: dataset.name })}><Pencil size={12} /></button>}</>}</span>
+                    <span className="dataset-title">{editingDatasetName?.id === dataset.id ? <form className="dataset-name-editor" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) saveDatasetName() }} onSubmit={(event) => { event.preventDefault(); saveDatasetName() }}><input autoFocus aria-label={`Rename ${dataset.name}`} value={editingDatasetName.value} onChange={(event) => setEditingDatasetName({ id: dataset.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingDatasetName(null) } }} /><button type="submit" title="Confirm name" aria-label="Confirm name"><Check size={12} /></button></form> : <><span className="dataset-name">{dataset.name}</span>{!pendingTrace && <button className="dataset-edit-name" title="Rename dataset" aria-label={`Rename ${dataset.name}`} onClick={() => setEditingDatasetName({ id: dataset.id, value: dataset.name })}><Pencil size={12} /></button>}</>}</span>
                     <span className="dataset-detail">{dataset.kind === 'speed' ? `${dataset.rpm?.toLocaleString() ?? '—'} ${dataset.speedUnit || 'RPM'}${dataset.igv === undefined ? '' : ` · IGV ${dataset.igv}${dataset.igvUnit ? ` ${dataset.igvUnit}` : ''}`}` : dataset.kind === 'efficiency' ? `${dataset.efficiencyValue ?? '—'}% contour` : dataset.kind === 'surge' ? 'Surge boundary' : dataset.kind === 'choke' ? 'Choke boundary' : `${dataset.points.length} points`}</span>
                   </span>
                   <span className="dataset-point-count">{dataset.points.length}</span>
@@ -2139,7 +2164,7 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">RECONSTRUCTION</span><h2>Line appearance</h2></div></div><p className="section-copy">Select axes in Process image, or use the leftmost vertical and lowest horizontal lines by default. Verify them against the scan.</p>{(['curve', 'grid', 'axis'] as const).map((kind) => <label className="format-control" key={kind}><span>{kind} color</span><input aria-label={`Reconstructed ${kind} color`} type="color" disabled={preprocessing} value={reconstructionColors[kind]} onChange={(event) => updateReconstructionAppearance({ ...reconstructionColors, [kind]: event.target.value }, reconstructionWidths)} /></label>)}{(['curve', 'grid'] as const).map((kind) => <label className="range-row" key={kind}><span>{kind === 'grid' ? 'Grid and axis' : 'Curve'} thickness</span><strong>{reconstructionWidths[kind]} px</strong><input aria-label={`Reconstructed ${kind} thickness`} type="range" min="0.5" max="8" step="0.5" disabled={preprocessing} value={reconstructionWidths[kind]} onChange={(event) => updateReconstructionAppearance(reconstructionColors, { ...reconstructionWidths, [kind]: Number(event.target.value) })} /></label>)}</section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">CALIBRATION</span><h2>Marker appearance</h2></div></div><p className="section-copy">The selected calibration point uses this color. Confirmed calibration hides the markers.</p><label className="format-control"><span>Selected marker color</span><input aria-label="Selected calibration marker color" type="color" value={calibrationMarkerColor} onChange={(event) => setCalibrationMarkerColor(event.target.value)} /></label></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
-            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={exportProject}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{isDesktop ? 'Local learning' : 'Shared learning'}</h2></div></div>
               <p className="section-copy">{isDesktop ? 'Learning stores numeric comparisons locally, not new training images. Images saved by older versions remain until deleted.' : 'Learning sends numeric curve comparisons and model updates to Supabase, not images. Numeric data may reveal information. Anyone with the public key can submit updates.'} Point-spacing comparisons stay on this device; only the numeric spacing target is queued for Supabase when online sync is configured. Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
               {learningError ? <p className="section-copy" role="alert">Storage unavailable: {learningError}. Restart the app to retry.</p> : learningState ? <>
@@ -2165,6 +2190,7 @@ export default function App() {
 
       <input ref={imageInput} type="file" accept="image/*" className="visually-hidden" aria-label="Choose plot image" onChange={(event) => { openImage(event.target.files?.[0]); event.target.value = '' }} />
       <input ref={projectInput} type="file" accept="application/json,.json" className="visually-hidden" aria-label="Open plot project" onChange={(event) => { void importProject(event.target.files?.[0]); event.target.value = '' }} />
+      <CloudProjects open={cloudOpen} onClose={() => setCloudOpen(false)} name={projectName} resetKey={cloudResetKey} saveProject={(name, save) => exportProject({ name, save })} openProject={(project) => importProject(new File([JSON.stringify(project)], 'cloud-project.json', { type: 'application/json' }), true)} />
       {notice && <div role="status" className={`toast ${notice.type ?? ''}`}><span className="toast-icon">{notice.type === 'error' ? '!' : <Check size={14} />}</span>{notice.message}<button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {loading && <div className="loading-overlay" aria-live="polite"><span className="loading-spinner" /> Following the curve…</div>}
     </main>

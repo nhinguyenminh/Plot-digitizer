@@ -12,6 +12,7 @@
     "package:win": "npm run build && electron-builder --win portable"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.89.0",
     "exceljs": "^4.4.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
