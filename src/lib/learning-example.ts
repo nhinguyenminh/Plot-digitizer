@@ -12,7 +12,7 @@ async function hashPixels(images: Uint8ClampedArray[]) {
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export async function createLearningExample(sourceUrl: string, geometry: Reconstruction, corrections: Correction[], widths: ReconstructionWidths, model: LearningModel): Promise<{ sample: TrainingSample; model: LearningModel; updated: boolean }> {
+export async function createLearningExample(sourceUrl: string, geometry: Reconstruction, corrections: Correction[], widths: ReconstructionWidths, model: LearningModel): Promise<{ sample: TrainingSample; model: LearningModel; updated: boolean; pixels: { width: number; height: number; source: Uint8ClampedArray; automatic: Uint8ClampedArray }; corrected: Uint8ClampedArray }> {
   const source = new Image()
   source.src = sourceUrl
   await source.decode()
@@ -39,6 +39,6 @@ export async function createLearningExample(sourceUrl: string, geometry: Reconst
   const delta = model.weights.map((weight, index) => Math.round(Math.max(-0.5, Math.min(0.5, (next?.weights[index] ?? weight) - weight)) * 10000) / 10000)
   return {
     sample: { id, createdAt: new Date().toISOString(), delta, ...(next ? { comparison } : {}) },
-    model: next ?? model, updated: next !== null,
+    model: next ?? model, updated: next !== null, pixels, corrected: target,
   }
 }

@@ -1,20 +1,588 @@
-.image-prep-section{border-bottom:1px solid var(--line);background:linear-gradient(145deg,rgba(72,215,191,.065),transparent 62%)}.prep-step-icon{width:30px;height:30px;display:grid;place-items:center;border-radius:9px;color:var(--mint);background:rgba(72,215,191,.1);border:1px solid rgba(72,215,191,.2)}.prep-empty{display:flex;align-items:center;gap:9px;padding:12px;border:1px dashed #39423e;border-radius:9px;color:#a5b0aa;font-size:11px;line-height:1.5}.prep-empty svg{flex:none;color:var(--mint)}.prep-range{margin:13px 0 8px}.prep-range input[type=range]{width:100%;accent-color:var(--mint)}.prep-range input[type=range]:disabled{opacity:.4}.prep-check{display:flex;align-items:center;gap:8px;margin:12px 0;color:#c1cac5;font-size:11px;cursor:pointer}.prep-check input{accent-color:var(--mint)}.prep-actions{display:grid;grid-template-columns:1fr auto;gap:7px;margin-top:14px}.prep-apply,.prep-compare,.prep-continue,.axis-detect-button{min-height:34px;display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid #35403b;border-radius:8px;background:#202724;color:#d6dfda;font-size:10px;font-weight:600;cursor:pointer}.prep-apply{color:#071a16;border-color:var(--mint);background:var(--mint)}.prep-apply:disabled,.prep-continue:disabled{opacity:.55;cursor:wait}.prep-compare{padding:0 9px;color:#b8c4be}.prep-compare[aria-pressed=true]{border-color:#4b7568;color:var(--mint)}.prep-compare-note,.axis-detect-note{margin:9px 0 0;color:#9ba8a1;font-size:10px;line-height:1.5}.prep-continue{width:100%;margin-top:10px;border-color:#346459;color:#b9f2e6;background:#17342e}.axis-detect-button{width:100%;margin-top:12px;color:#b8e8dc}.axis-detect-note{padding:0 2px}.canvas-zone.drag-active{outline:2px dashed var(--mint);outline-offset:-8px;background:rgba(72,215,191,.05)}.plot-canvas:focus-visible{outline:2px solid var(--mint);outline-offset:3px}.canvas-hint{max-width:58%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tool-button:disabled{opacity:.38;cursor:not-allowed}@media(max-width:620px){.prep-actions{grid-template-columns:1fr}.prep-compare{min-height:32px}.canvas-hint{max-width:38%}}
-.four-point-calibration{margin:12px 0;padding:12px;border:1px solid #35403b;border-radius:9px;background:rgba(255,255,255,.018)}.four-point-calibration>strong{font-size:11px;color:#dbe5e0}.four-point-calibration>p{margin:5px 0 10px;color:#9ba8a1;font-size:10px;line-height:1.5}.four-point-values{display:grid;grid-template-columns:1fr 1fr;gap:7px}.four-point-values label{display:grid;gap:4px;color:#aeb9b3;font-size:9px;font-weight:700}.four-point-values input{width:100%;min-width:0;height:30px;padding:0 8px;border:1px solid #35403b;border-radius:6px;background:#141817;color:#e7ece9;font-size:10px}.four-point-calibration .axis-detect-button:disabled{opacity:.45;cursor:not-allowed}
-.compressor-axis-fields{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;padding:9px 0;border-top:1px solid var(--line)}.compressor-axis-fields:first-of-type{border-top:0}.compressor-axis-fields .format-control{min-width:0}.compressor-axis-fields .format-control:first-child{grid-column:1/-1}.compressor-axis-fields input{width:100%;min-width:0;height:31px;padding:0 8px;border:1px solid #35403b;border-radius:6px;background:#141817;color:#e7ece9;font-size:10px}.point-coordinate-input{width:76px;min-width:60px;padding:4px;border:1px solid #35403b;border-radius:4px;background:#141817;color:#e7ece9;font:inherit}
-.axis-point-list label{display:grid;grid-template-columns:auto minmax(52px,1fr);align-items:center;gap:4px;padding:4px;border:1px solid #323a35;border-radius:4px;background:#202623;color:#8e9a93;font:8px var(--mono)}.axis-point-list label>span{border:0;background:transparent;padding:0}.axis-point-list label input{width:100%;min-width:0;height:20px;padding:0 4px;border:1px solid #343d38;border-radius:3px;background:#141917;color:#d5ddd8;font:8px var(--mono)}.axis-point-list label small{grid-column:1/-1}.axis-detect-button.waiting{border-color:#4e8a76;color:#c5f4e5;background:#264137}
-.prep-check .grid-color-input{width:24px;height:22px;margin-left:auto;padding:2px;border:1px solid #35403b;border-radius:5px;background:#141817;cursor:pointer}
-.grid-removal-note{margin:-6px 0 10px 24px;color:#8f9c95;font-size:9px;line-height:1.45}
-.grid-guide-controls{display:grid;gap:6px;margin:10px 0;padding:9px;border:1px solid #35403b;border-radius:7px;background:rgba(255,255,255,.015);color:#aeb9b3;font-size:9px}.grid-guide-controls>div{display:grid;grid-template-columns:1fr 1fr;gap:6px}.grid-guide-controls button{min-height:28px;padding:4px 6px;border:1px solid #35403b;border-radius:6px;background:#202724;color:#c1cac5;font-size:9px;cursor:pointer}.grid-guide-controls button.active{border-color:#b9a7ff;color:#e3ddff;background:rgba(185,167,255,.12)}.grid-guide-controls small{display:flex;align-items:center;gap:7px;color:#8f9c95;font-size:8px}.grid-guide-controls small button{min-height:22px;margin-left:auto;padding:2px 6px;font-size:8px}
-.crop-overlay{pointer-events:none}.crop-overlay polyline{vector-effect:non-scaling-stroke}.format-control input[type=color]{width:34px;height:26px;padding:2px;border:1px solid #38413c;border-radius:4px;background:#141817;cursor:pointer}.calibration-confirm-row{display:flex;flex-direction:column;gap:6px;margin:12px 0;padding:9px;border:1px solid #35403b;border-radius:7px;color:#aeb9b1;font-size:10px}.calibration-confirm-row .axis-detect-button{margin-top:0}
-.prep-main{width:100%;margin-top:12px}.grid-guide-controls button:disabled,.prep-compare:disabled{opacity:.45;cursor:not-allowed}
-.calibration-section details{margin:12px 0;color:#9ba8a1;font-size:10px}.calibration-section summary{cursor:pointer;color:#b8c4be}.calibration-section .axis-point-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:10px 0 0}.calibration-section .axis-point-list label{padding:7px;gap:6px;font-size:10px}.calibration-section .axis-point-list label input{height:30px;font-size:11px}.calibration-section .axis-point-list label small{font-size:9px}.calibration-section .calibration-primary{background:var(--mint);border-color:var(--mint);color:#071a16}.calibration-section .axis-detect-button:disabled{opacity:.45;cursor:not-allowed}
-.trace-actions{grid-template-columns:1fr 1fr}.trace-actions .clear-brushes{grid-column:1/-1}
-.deskew-controls { display: flex; flex-direction: column; gap: 7px; margin: 8px 0; }
-.deskew-controls > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.deskew-controls form { display: flex; align-items: center; gap: 7px; }
-.deskew-controls button.active { border-color: #48d7bf; background: #24574a; }
-.deskew-controls button { padding: 6px 9px; border: 1px solid #4d665a; border-radius: 4px; background: #22352d; color: #d3eee2; cursor: pointer; }
-.deskew-controls button:disabled { opacity: .45; cursor: not-allowed; }
-.deskew-controls label { display: flex; align-items: center; gap: 5px; color: #b6c4ba; font-size: 10px; }
-.deskew-controls input { width: 65px; padding: 4px; border: 1px solid #53675c; border-radius: 3px; background: #141917; color: #e7ece9; }
-.deskew-controls small { color: #a7b6ac; line-height: 1.4; }
+.image-prep-section {
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(155deg, rgba(45, 212, 191, 0.065), transparent 58%);
+}
+
+.prep-step-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--mint-bright);
+  background: rgba(45, 212, 191, 0.12);
+  border: 1px solid rgba(45, 212, 191, 0.28);
+}
+
+.prep-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.prep-empty svg {
+  flex: none;
+  color: var(--mint);
+}
+
+.prep-range {
+  margin: 13px 0 8px;
+}
+
+.prep-range input[type='range'] {
+  width: 100%;
+}
+
+.prep-range input[type='range']:disabled {
+  opacity: 0.4;
+}
+
+.prep-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 12px 0;
+  color: var(--text-soft);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.prep-check input {
+  accent-color: var(--mint);
+}
+
+.prep-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.prep-apply,
+.prep-compare,
+.prep-continue,
+.axis-detect-button {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.prep-compare:hover:not(:disabled),
+.axis-detect-button:hover:not(:disabled) {
+  background: var(--panel-3);
+  border-color: rgba(45, 212, 191, 0.45);
+  color: #ffffff;
+}
+
+.prep-apply {
+  color: #061816;
+  border-color: rgba(94, 234, 212, 0.65);
+  background: linear-gradient(135deg, #5eead4 0%, #2dd4bf 100%);
+  box-shadow: 0 3px 14px rgba(45, 212, 191, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.prep-apply:hover:not(:disabled) {
+  background: linear-gradient(135deg, #7cf2e0 0%, #3be0cb 100%);
+  box-shadow: 0 5px 18px rgba(45, 212, 191, 0.36);
+}
+
+.prep-apply:disabled,
+.prep-continue:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.prep-compare {
+  padding: 0 10px;
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.prep-compare[aria-pressed='true'] {
+  border-color: rgba(45, 212, 191, 0.55);
+  background: rgba(45, 212, 191, 0.14);
+  color: var(--mint-bright);
+}
+
+.prep-compare-note,
+.axis-detect-note {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.prep-continue {
+  width: 100%;
+  margin-top: 10px;
+  border-color: rgba(45, 212, 191, 0.45);
+  color: var(--mint-bright);
+  background: rgba(45, 212, 191, 0.12);
+}
+
+.prep-continue:hover:not(:disabled) {
+  background: rgba(45, 212, 191, 0.22);
+}
+
+.axis-detect-button {
+  width: 100%;
+  margin-top: 10px;
+  color: var(--mint-bright);
+}
+
+.axis-detect-note {
+  padding: 0 2px;
+}
+
+.canvas-zone.drag-active {
+  outline: 2px dashed var(--mint);
+  outline-offset: -8px;
+  background-color: rgba(45, 212, 191, 0.06);
+}
+
+.plot-canvas:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 3px;
+}
+
+.canvas-hint {
+  max-width: 58%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.four-point-calibration {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.four-point-calibration > strong {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.four-point-calibration > p {
+  margin: 5px 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.four-point-values {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.four-point-values label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-soft);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.four-point-values input {
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.four-point-calibration .axis-detect-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.compressor-axis-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.compressor-axis-fields:first-of-type {
+  border-top: 0;
+}
+
+.compressor-axis-fields .format-control {
+  min-width: 0;
+}
+
+.compressor-axis-fields .format-control:first-child {
+  grid-column: 1 / -1;
+}
+
+.compressor-axis-fields input {
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11.5px;
+}
+
+.point-coordinate-input {
+  width: 78px;
+  min-width: 62px;
+  padding: 4px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.axis-point-list label {
+  display: grid;
+  grid-template-columns: auto minmax(56px, 1fr);
+  align-items: center;
+  gap: 5px;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-3);
+  color: var(--text-soft);
+  font: 500 10.5px var(--mono);
+}
+
+.axis-point-list label > span {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.axis-point-list label input {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 11px var(--mono);
+}
+
+.axis-point-list label small {
+  grid-column: 1 / -1;
+}
+
+.axis-detect-button.waiting {
+  border-color: var(--mint);
+  color: var(--mint-bright);
+  background: rgba(45, 212, 191, 0.16);
+}
+
+.prep-check .grid-color-input {
+  width: 26px;
+  height: 24px;
+  margin-left: auto;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.grid-removal-note {
+  margin: -6px 0 10px 24px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.grid-guide-controls {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.grid-guide-controls > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.grid-guide-controls button {
+  min-height: 31px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-3);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.grid-guide-controls button:hover:not(:disabled) {
+  border-color: rgba(45, 212, 191, 0.42);
+  color: #ffffff;
+}
+
+.grid-guide-controls button.active {
+  border-color: #a78bfa;
+  color: #ede9fe;
+  background: rgba(167, 139, 250, 0.18);
+}
+
+.grid-guide-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.grid-guide-controls label input[type='checkbox'] {
+  accent-color: var(--mint);
+}
+
+.grid-guide-controls small {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.grid-guide-controls small button {
+  min-height: 24px;
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+.crop-overlay {
+  pointer-events: none;
+}
+
+.crop-overlay polyline {
+  vector-effect: non-scaling-stroke;
+}
+
+.format-control input[type='color'] {
+  width: 38px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.calibration-confirm-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.calibration-confirm-row .axis-detect-button {
+  margin-top: 0;
+}
+
+.prep-main {
+  width: 100%;
+  margin-top: 12px;
+}
+
+.grid-guide-controls button:disabled,
+.prep-compare:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.calibration-section details {
+  margin: 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-section summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.calibration-section .axis-point-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 10px 0 0;
+}
+
+.calibration-section .axis-point-list label {
+  padding: 8px;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.calibration-section .axis-point-list label input {
+  height: 30px;
+  font-size: 11.5px;
+}
+
+.calibration-section .axis-point-list label small {
+  font-size: 9.5px;
+}
+
+.calibration-section .calibration-primary {
+  background: linear-gradient(135deg, #5eead4 0%, #2dd4bf 100%);
+  border-color: rgba(94, 234, 212, 0.65);
+  color: #061816;
+  box-shadow: 0 3px 14px rgba(45, 212, 191, 0.25);
+}
+
+.calibration-section .calibration-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #7cf2e0 0%, #3be0cb 100%);
+  color: #061816;
+}
+
+.calibration-section .axis-detect-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.trace-actions {
+  grid-template-columns: 1fr 1fr;
+}
+
+.trace-actions .clear-brushes {
+  grid-column: 1 / -1;
+}
+
+/* Deskew Panel */
+.deskew-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.deskew-controls > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.deskew-controls form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.deskew-controls button {
+  padding: 6px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-3);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.deskew-controls button:hover:not(:disabled) {
+  border-color: rgba(45, 212, 191, 0.45);
+  color: #ffffff;
+}
+
+.deskew-controls button.active {
+  border-color: var(--mint);
+  background: rgba(45, 212, 191, 0.18);
+  color: var(--mint-bright);
+}
+
+.deskew-controls button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.deskew-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.deskew-controls input {
+  width: 68px;
+  padding: 5px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.deskew-controls small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+@media (max-width: 620px) {
+  .prep-actions { grid-template-columns: 1fr; }
+  .prep-compare { min-height: 32px; }
+  .canvas-hint { max-width: 38%; }
+}

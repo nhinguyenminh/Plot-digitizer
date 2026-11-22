@@ -2,6 +2,8 @@ import { initialLearningModel } from './learning'
 import type { CurveComparison, LearningModel } from './learning'
 import { initialPointSpacingModel } from './point-spacing'
 import type { PointSpacingModel } from './point-spacing'
+import { initialInteractionModel, isValidInteractionModel } from './interaction-learning'
+import type { InteractionModel } from './interaction-learning'
 
 export interface TrainingSample {
   id: string
@@ -25,6 +27,8 @@ export interface LearningStore {
   savePointSpacingModel(model: PointSpacingModel): Promise<void>
   savePointSpacingSamples(samples: TrainingSample[], model: PointSpacingModel): Promise<void>
   acknowledgePointSpacing(id: string, model: PointSpacingModel): Promise<void>
+  loadInteractionModel(): Promise<InteractionModel>
+  saveInteractionModel(model: InteractionModel): Promise<void>
   hasSample(id: string): Promise<boolean>
   saveSample(sample: TrainingSample, model: LearningModel): Promise<void>
   pendingSamples(): Promise<TrainingSample[]>
@@ -125,6 +129,20 @@ export function createLocalLearningStore(): LearningStore {
         tx.objectStore('settings').put(model, 'point-spacing-model')
       })
     },
+    async loadInteractionModel() {
+      return transaction(['settings'], 'readonly', async (tx) => {
+        const model = await get<InteractionModel>(tx.objectStore('settings'), 'interaction-model')
+        if (!model) return initialInteractionModel()
+        if (!isValidInteractionModel(model)) throw new Error('Invalid local interaction learning model.')
+        return model
+      })
+    },
+    async saveInteractionModel(model) {
+      if (!isValidInteractionModel(model)) throw new Error('Invalid local interaction learning model.')
+      await transaction(['settings'], 'readwrite', async (tx) => {
+        tx.objectStore('settings').put(model, 'interaction-model')
+      })
+    },
     async saveSample(sample, model) {
       await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
         tx.objectStore('samples').add(sample)
@@ -161,6 +179,7 @@ export function createLocalLearningStore(): LearningStore {
         tx.objectStore('samples').clear()
         tx.objectStore('settings').delete('model')
         tx.objectStore('settings').delete('point-spacing-model')
+        tx.objectStore('settings').delete('interaction-model')
       })
     },
   }

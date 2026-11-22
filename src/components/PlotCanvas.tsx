@@ -28,6 +28,7 @@ interface Props {
   datasets: Dataset[]
   activeDatasetId: string
   selectionVersion: number
+  selectedPointHint?: { datasetId: string; index: number; version: number } | null
   onSelectDataset: (id: string) => void
   mode: ToolMode
   gridGuides: GridGuides
@@ -64,6 +65,7 @@ interface Props {
   onRegionSelection: (rect: PlotRegion) => void
   onStraighten: (start: PixelPoint, end: PixelPoint) => void
   onMovePoint: (datasetId: string, index: number, point: PixelPoint) => void
+  onPointMoveEnd?: (datasetId: string, index: number, from: PixelPoint, to: PixelPoint) => void
   onMoveCalibrationPoint: (axis: 'x' | 'y', index: number, point: PixelPoint) => void
   onTraceRegion: (points: PixelPoint[]) => void
 }
@@ -72,12 +74,14 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, selectedPointHint, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onPointMoveEnd, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const lensCanvasRef = useRef<HTMLCanvasElement>(null)
   const draggedPointRef = useRef<PointSelection | null>(null)
+  const dragStartPointRef = useRef<PixelPoint | null>(null)
+  const dragLastPointRef = useRef<PixelPoint | null>(null)
   const draggedCalibrationRef = useRef<{ axis: 'x' | 'y'; index: number } | null>(null)
   const traceStrokeRef = useRef<PixelPoint[]>([])
   const cropStartRef = useRef<PixelPoint | null>(null)
@@ -162,6 +166,9 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
   }, [contextMenu])
   useEffect(() => setSelectedPoint((current) => current?.datasetId === activeDatasetId ? current : null), [activeDatasetId])
   useEffect(() => setSelectedPoint(null), [selectionVersion])
+  useEffect(() => {
+    if (selectedPointHint) setSelectedPoint({ datasetId: selectedPointHint.datasetId, index: selectedPointHint.index })
+  }, [selectedPointHint])
   useEffect(() => { setScale(1) }, [imageDisplayMode])
   useEffect(() => {
     const viewportElement = viewportRef.current
@@ -400,8 +407,8 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     if (readOnly) return
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
     if (mode === 'calibrate-edit' || mode === 'point-edit' || mode === 'select' || mode === 'prep-straighten') return
+    event.currentTarget.focus()
     onCanvasClick(toImagePoint(event))
-    if (mode === 'point' && activeDataset) setSelectedPoint({ datasetId: activeDataset.id, index: activeDataset.points.length })
   }
 
   const handleCanvasKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
@@ -440,13 +447,16 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       })
       return
     }
-    if ((mode !== 'point-edit' && mode !== 'select') || !selectedPoint || !selectedDataset) return
+    const canNudgePoint = mode === 'point-edit' || mode === 'select' || mode === 'point' || mode === 'surge' || mode === 'choke' || mode === 'measure'
+    if (!canNudgePoint || !selectedPoint || !selectedDataset) return
     const point = selectedDataset.points[selectedPoint.index]
     if (!point) return
-    onMovePoint(selectedPoint.datasetId, selectedPoint.index, {
+    const nextPoint = {
       x: Math.max(0, Math.min(dimensions.width - 1, point.x + direction.x * step)),
       y: Math.max(0, Math.min(dimensions.height - 1, point.y + direction.y * step)),
-    })
+    }
+    onMovePoint(selectedPoint.datasetId, selectedPoint.index, nextPoint)
+    onPointMoveEnd?.(selectedPoint.datasetId, selectedPoint.index, point, nextPoint)
   }
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -501,7 +511,10 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     }
     if (nearest) {
       const selection = { datasetId: nearest.datasetId, index: nearest.index }
+      const origin = datasets.find((dataset) => dataset.id === nearest.datasetId)?.points[nearest.index]
       draggedPointRef.current = selection
+      dragStartPointRef.current = origin ? { ...origin } : null
+      dragLastPointRef.current = origin ? { ...origin } : null
       setSelectedPoint(selection)
       if (nearest.datasetId !== activeDatasetId) onSelectDataset(nearest.datasetId)
       event.currentTarget.focus()
@@ -515,7 +528,10 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       x: Math.max(0, Math.min(dimensions.width - 1, rawPoint.x)),
       y: Math.max(0, Math.min(dimensions.height - 1, rawPoint.y)),
     }
-    if (draggedPointRef.current !== null) onMovePoint(draggedPointRef.current.datasetId, draggedPointRef.current.index, point)
+    if (draggedPointRef.current !== null) {
+      dragLastPointRef.current = point
+      onMovePoint(draggedPointRef.current.datasetId, draggedPointRef.current.index, point)
+    }
     if (draggedCalibrationRef.current) {
       const { axis, index } = draggedCalibrationRef.current
       onMoveCalibrationPoint(axis, index, point)
@@ -572,8 +588,14 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       return
     }
     if (draggedPointRef.current !== null) {
+      const moved = draggedPointRef.current
+      const startPoint = dragStartPointRef.current
+      const endPoint = dragLastPointRef.current
       draggedPointRef.current = null
+      dragStartPointRef.current = null
+      dragLastPointRef.current = null
       suppressClickRef.current = true
+      if (startPoint && endPoint) onPointMoveEnd?.(moved.datasetId, moved.index, startPoint, endPoint)
       return
     }
     const start = cropStartRef.current
@@ -626,7 +648,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       {imageUrl ? <>
         <div ref={viewportRef} className={`canvas-scroll ${imageDisplayMode === 'fit' ? 'canvas-fit' : 'canvas-original'}`}>
           <div className="canvas-scale" style={{ width: dimensions.width * displayScale, height: dimensions.height * displayScale }}>
-            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={() => { traceStrokeRef.current = []; cropStartRef.current = null; cropCursorRef.current = null; setTraceStroke([]); setCropStart(null); setCropCursor(null); draggedPointRef.current = null; draggedCalibrationRef.current = null }} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Select a curve point in Modify mode and press Delete to remove it, or use arrow keys to move it; hold Shift to move ten pixels." />
+            <canvas ref={canvasRef} tabIndex={0} className={`plot-canvas mode-${mode}`} onClick={handleCanvasClick} onKeyDown={handleCanvasKeyDown} onContextMenu={handleContextMenu} onPointerDown={handlePointerDown} onPointerUp={handlePointerUp} onPointerCancel={() => { traceStrokeRef.current = []; cropStartRef.current = null; cropCursorRef.current = null; setTraceStroke([]); setCropStart(null); setCropCursor(null); draggedPointRef.current = null; dragStartPointRef.current = null; dragLastPointRef.current = null; draggedCalibrationRef.current = null }} onPointerMove={handleMove} onPointerLeave={() => { setCursor(null); setLensPosition(null) }} aria-label="Plot image canvas. Select a curve point in Modify mode and press Delete to remove it, or use arrow keys to move it; hold Shift to move ten pixels." />
             {brushOverlay && <canvas className="brush-overlay" width={dimensions.width} height={dimensions.height} ref={(canvas) => { if (canvas) { const ctx = canvas.getContext('2d'); if (ctx) { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(brushOverlay, 0, 0) } } }} />}
             {(healPreview || cropRect || plotRegion || (mode !== 'trace-region' && mode !== 'prep-heal' && traceStroke.length > 0) || ((mode === 'prep-erase' || mode === 'trace-region' || mode === 'prep-heal') && cursor) || gridGuides.horizontal.length > 0 || gridGuides.vertical.length > 0 || axisGuides.horizontal !== null || axisGuides.vertical !== null) && dimensions.width > 0 && <svg className="crop-overlay" viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="none" aria-hidden="true">
               {healPreview && <polyline points={healPreview.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke="#ff9e38" strokeWidth={Math.max(2, correctionWidth)} strokeDasharray="4 2" strokeLinecap="round" />}

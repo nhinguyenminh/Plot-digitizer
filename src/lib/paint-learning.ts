@@ -15,7 +15,7 @@ export async function createPaintLearningExample(
   additions: Uint8Array,
   removals: Uint8Array,
   model: LearningModel,
-): Promise<{ sample: TrainingSample; model: LearningModel; updated: boolean }> {
+): Promise<{ sample: TrainingSample; model: LearningModel; updated: boolean; corrected: Uint8ClampedArray }> {
   const size = pixels.width * pixels.height
   if (!Number.isSafeInteger(size) || size <= 0 || pixels.source.length !== size * 4
     || pixels.automatic.length !== size * 4 || additions.length !== size || removals.length !== size) {
@@ -39,6 +39,6 @@ export async function createPaintLearningExample(
   const delta = model.weights.map((weight, index) => Math.round(Math.max(-0.5, Math.min(0.5, (next?.weights[index] ?? weight) - weight)) * 10000) / 10000)
   return {
     sample: { id, createdAt: new Date().toISOString(), delta, ...(next ? { comparison } : {}) },
-    model: next ?? model, updated: next !== null,
+    model: next ?? model, updated: next !== null, corrected,
   }
 }
