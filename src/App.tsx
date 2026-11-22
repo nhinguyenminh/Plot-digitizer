@@ -1602,15 +1602,17 @@ export default function App() {
     }
   }
 
-  const snapPointsToCurve = async () => {
+  const snapPointsToCurve = async (scope: 'selected' | 'all' = 'selected') => {
     const snapImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
     if (!snapImageUrl || !imagePrepared || loading || preprocessing) return
-    const targetIds = selectedDatasetIds.length > 1
-      ? selectedDatasetIds
-      : activeDataset ? [activeDataset.id] : []
+    const targetIds = scope === 'all'
+      ? datasets.map((dataset) => dataset.id)
+      : selectedDatasetIds.length > 1
+        ? selectedDatasetIds
+        : activeDataset ? [activeDataset.id] : []
     const targets = datasets.filter((dataset) => targetIds.includes(dataset.id) && dataset.kind !== 'measurement' && dataset.points.length > 0)
     if (!targets.length) {
-      showNotice('Select a curve dataset with at least one point before snapping.', 'error')
+      showNotice(scope === 'all' ? 'Add at least one curve dataset with points before snapping all datasets.' : 'Select a curve dataset with at least one point before snapping.', 'error')
       return
     }
     const run = processingRun.current
@@ -1691,7 +1693,8 @@ export default function App() {
           pixels: learningPixels,
         }))
       }
-      showNotice(`Snapped ${totalMoved} of ${totalInspected} point${totalInspected === 1 ? '' : 's'} onto the curve (radius ${Math.round(radius)} px). Use Undo if needed.`)
+      const datasetSuffix = updatedById.size > 1 ? ` across ${updatedById.size} datasets` : ''
+      showNotice(`Snapped ${totalMoved} of ${totalInspected} point${totalInspected === 1 ? '' : 's'}${datasetSuffix} onto the curve (radius ${Math.round(radius)} px). Use Undo if needed.`)
     } catch (error) {
       if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Could not snap points to the curve.', 'error')
     } finally {
@@ -2275,7 +2278,10 @@ export default function App() {
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
-            <button className="tool-button" onClick={() => { void snapPointsToCurve() }} disabled={!imagePrepared || loading || !datasets.some((dataset) => (selectedDatasetIds.length > 1 ? selectedDatasetIds.includes(dataset.id) : dataset.id === activeDataset?.id) && dataset.kind !== 'measurement' && dataset.points.length > 0)} title={`Align slightly off-curve points onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}><span className="tool-icon"><Magnet size={16} /></span><span>Snap points to curve</span></button>
+            <div className="tool-split">
+              <button className="tool-button" onClick={() => { void snapPointsToCurve('selected') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => (selectedDatasetIds.length > 1 ? selectedDatasetIds.includes(dataset.id) : dataset.id === activeDataset?.id) && dataset.kind !== 'measurement' && dataset.points.length > 0)} title={`Align slightly off-curve points in the active/selected dataset onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}><span className="tool-icon"><Magnet size={16} /></span><span>Snap to curve</span></button>
+              <button className="tool-sub-action" onClick={() => { void snapPointsToCurve('all') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => dataset.kind !== 'measurement' && dataset.points.length > 0)} aria-label="Snap all datasets to curve" title={`Snap ALL curve datasets in this chart onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}>All</button>
+            </div>
             <button className="tool-button" onClick={retraceActiveDataset} disabled={!imagePrepared || loading || activePoints < 2}><span className="tool-icon"><ScanSearch size={16} /></span><span>Retrace edited curve</span></button>
             <button className={`tool-button ${mode === 'measure' ? 'selected' : ''}`} onClick={() => setMode('measure')} disabled={!imagePrepared}><span className="tool-icon"><Ruler size={16} /></span><span>Measure angle / distance</span></button>
             {plotType === 'compressor' && <>
@@ -2473,7 +2479,7 @@ export default function App() {
             {workflowStep === 'digitize' && <>
             {plotType === 'compressor' && <section className="compressor-note"><div className="note-icon"><Gauge size={15} /></div><div><strong>Optional boundaries</strong><span>Add Surge/Choke to stop speed traces near their sampled points.</span></div><span className="note-status">{datasets.filter((dataset) => dataset.kind === 'surge' || dataset.kind === 'choke').filter((dataset) => dataset.points.length >= 2).length}/2</span></section>}
             <section className="panel-section datasets-section"><div className="section-heading dataset-heading"><div><span className="section-kicker">STEP 03</span><h2>Datasets <span className="count-pill">{datasets.length}</span></h2></div><button className="add-small" aria-label="Add dataset" disabled={Boolean(pendingTrace)} onClick={() => addDataset()} title="Add dataset">+</button></div>
-              <div className="dataset-bulk-actions"><span>{selectedDatasetIds.length ? `${selectedDatasetIds.length} selected` : 'Select multiple'}</span><button disabled={selectedDatasetIds.length < 2} onClick={mergeSelectedDatasets} title="Merge selected datasets">Merge</button><button className="bulk-delete" disabled={selectedDatasetIds.length < 2} onClick={deleteSelectedDatasets} title="Delete selected datasets">Delete</button><button className="bulk-delete" disabled={!datasets.some((dataset) => dataset.points.length) || Boolean(pendingTrace)} onClick={clearData}>Clear data</button></div>
+              <div className="dataset-bulk-actions"><span>{selectedDatasetIds.length ? `${selectedDatasetIds.length} selected` : 'Select multiple'}</span><button disabled={!imagePrepared || loading || Boolean(pendingTrace) || !datasets.some((dataset) => dataset.kind !== 'measurement' && dataset.points.length > 0)} onClick={() => { void snapPointsToCurve('all') }} title={`Snap all curve datasets onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}>Snap all</button><button disabled={selectedDatasetIds.length < 2} onClick={mergeSelectedDatasets} title="Merge selected datasets">Merge</button><button className="bulk-delete" disabled={selectedDatasetIds.length < 2} onClick={deleteSelectedDatasets} title="Delete selected datasets">Delete</button><button className="bulk-delete" disabled={!datasets.some((dataset) => dataset.points.length) || Boolean(pendingTrace)} onClick={clearData}>Clear data</button></div>
               <label className="range-row"><span>Curve point marker size</span><strong>{pointMarkerSize}%</strong><input aria-label="Curve point marker size" type="range" min="25" max="200" step="25" value={pointMarkerSize} onChange={(event) => setPointMarkerSize(Number(event.target.value))} /></label>
               <label className="format-control"><span>Insert manual points by X</span><input aria-label="Insert manual points between X neighbors" type="checkbox" checked={insertPointsByX} onChange={(event) => setInsertPointsByX(event.target.checked)} /></label>
               <p className="dataset-selection-hint">Drag the handle to reorder. Shift-click a range or Ctrl/Cmd-click datasets to select several.{pendingTrace ? ' During review, only new datasets can be reordered, merged or deleted.' : ''}</p>

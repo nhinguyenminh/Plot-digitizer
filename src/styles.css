@@ -482,6 +482,43 @@ input[type='range']:disabled {
   cursor: pointer;
 }
 
+.tool-split {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.tool-split .tool-button {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.tool-sub-action {
+  height: 30px;
+  padding: 0 8px;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-2);
+  color: var(--mint-bright);
+  font: 600 10px var(--mono);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tool-sub-action:hover:not(:disabled) {
+  background: rgba(45, 212, 191, 0.16);
+  border-color: rgba(45, 212, 191, 0.5);
+}
+
+.tool-sub-action:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .tool-button:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.05);
   color: #ffffff;
@@ -2131,7 +2168,7 @@ tbody tr:hover {
   .rail-heading > span { font-size: 8px; }
   .tool-group-label { font-size: 7.5px; padding: 0 3px 6px; letter-spacing: 0.4px; }
   .tool-button { height: 34px; justify-content: center; padding: 0; }
-  .tool-button > span:nth-child(2), .tool-button kbd, .transform-grid { display: none; }
+  .tool-button > span:nth-child(2), .tool-button kbd, .transform-grid, .tool-sub-action { display: none; }
   .tool-icon { width: 21px; }
   .rail-bottom { height: 39px; padding: 0 6px; justify-content: center; }
   .rail-bottom > span:nth-child(2), .rail-bottom button { display: none; }
