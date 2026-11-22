@@ -1,5 +1,6 @@
 import { simplifyDetectedTrace } from './digitizer.ts'
 import { removeSpacingOutliers } from './point-spacing.ts'
+import { smartSampleCurvePoints } from './smart-extract.ts'
 import type { PixelPoint } from './digitizer'
 
 export interface BrushMark {
@@ -151,6 +152,7 @@ export function extractPaintedCurves(
   maxGap = 25,
   minFragmentSpan = 8,
   isolatedCurveLayer = false,
+  curvatureBias?: number,
 ): PixelPoint[][] {
   const { width, height, data } = image
   if (mask.length !== width * height * 4) throw new Error('The brush selection does not match the image.')
@@ -262,7 +264,9 @@ export function extractPaintedCurves(
   }
   return tracks
     .filter((points) => minFragmentSpan === 0 || (points.length >= 5 && points[points.length - 1].x - points[0].x >= minFragmentSpan))
-    .map((points) => simplifyDetectedTrace(points, spacing))
+    .map((points) => curvatureBias !== undefined
+      ? smartSampleCurvePoints(points, { spacing, curvatureBias, preserveExtrema: true })
+      : simplifyDetectedTrace(points, spacing))
 }
 
 export interface BrushExtraction {
@@ -278,6 +282,7 @@ export function extractBrushCurves(
   curveColor?: [number, number, number],
   isolatedCurveLayer = false,
   allowEmpty = false,
+  curvatureBias?: number,
 ): BrushExtraction {
   const { width, height, data } = image
   if (mask.length !== width * height * 4) throw new Error('The brush selection does not match the image.')
@@ -321,7 +326,7 @@ export function extractBrushCurves(
     }
     const found = extractPaintedCurves(
       { width: regionWidth, height: regionHeight, data: regionData, colorSpace: image.colorSpace },
-      regionMask, spacing, tolerance, curveColor, 0, 0, isolatedCurveLayer,
+      regionMask, spacing, tolerance, curveColor, 0, 0, isolatedCurveLayer, curvatureBias,
     )
     if (!found.length) {
       warnings.push(`Brush region ${region} has no detectable curve.`)
@@ -400,11 +405,12 @@ export function extractBrushGroups(
   tolerance: number,
   curveColor?: [number, number, number],
   isolatedCurveLayer = false,
+  curvatureBias?: number,
 ): { curves: { points: PixelPoint[]; group: string }[]; warnings: string[] } {
   const curves: { points: PixelPoint[]; group: string }[] = []
   const warnings: string[] = []
   for (const group of groups) {
-    const result = extractBrushCurves(image, group.mask, spacing, tolerance, curveColor, isolatedCurveLayer, true)
+    const result = extractBrushCurves(image, group.mask, spacing, tolerance, curveColor, isolatedCurveLayer, true, curvatureBias)
     warnings.push(...result.warnings.map((warning) => `${group.name}: ${warning}`))
     if (!result.curves.length && !result.warnings.length) warnings.push(`${group.name}: The brush selection is empty.`)
     for (const curve of result.curves) {

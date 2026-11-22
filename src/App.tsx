@@ -35,6 +35,7 @@ import {
 import type { InteractionModel } from './lib/interaction-learning'
 import { insertPointInDataset, snapDatasetPointsToCurve } from './lib/point-tools'
 import type { CurveImageSource, CurveSnapMode } from './lib/point-tools'
+import { smartExtractCurvesFromLayer } from './lib/smart-extract'
 import { createLocalLearningStore } from './lib/learning-store'
 import { learningMasksToCorrections } from './lib/learning-edits'
 import { createLearningExample } from './lib/learning-example'
@@ -1240,6 +1241,101 @@ export default function App() {
     }
   }
 
+  const smartAutoExtractPoints = async () => {
+    const traceImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
+    if (!traceImageUrl || !imagePrepared || loading || preprocessing) return
+    const run = processingRun.current
+    setLoading(true)
+    try {
+      let curveImage: CurveImageSource
+      let extractMode: CurveSnapMode
+      let curveColor: [number, number, number] | undefined
+      let aiPixelCorrections = 0
+
+      if (!showOriginalPreview && processedImageUrl && reconstruction && !needsProcess) {
+        let learnedEdits = reconstruction.learnedCorrections ?? []
+        const learningPixels = learningStateRef.current?.enabled
+          && (learningStateRef.current.model.samples > 0 || interactionModelRef.current.featureSamples > 0)
+          ? await getInteractionPixels()
+          : undefined
+        if (run !== processingRun.current) return
+        if (learningPixels && learningStateRef.current) {
+          const prediction = predictEnhancedLearningEdits(learningStateRef.current.model, interactionModelRef.current, {
+            ...learningPixels,
+            region: reconstruction.region,
+          })
+          aiPixelCorrections = prediction.changed
+          learnedEdits = learningMasksToCorrections(prediction.add, prediction.erase, learningPixels.width, learningPixels.height)
+        }
+        const layer = renderReconstructionCurveLayer(
+          { ...reconstruction, learnedCorrections: [] },
+          [...learnedEdits, ...corrections],
+          reconstructionWidths,
+        )
+        const context = layer.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('This browser cannot read the curve layer.')
+        curveImage = context.getImageData(0, 0, layer.width, layer.height)
+        extractMode = 'isolated'
+      } else {
+        const image = new Image()
+        image.src = traceImageUrl
+        await image.decode()
+        if (run !== processingRun.current) return
+        if (image.naturalWidth * image.naturalHeight > 4_000_000) throw new Error('Use an image below 4 megapixels for smart automatic point extraction.')
+        const canvas = document.createElement('canvas')
+        canvas.width = image.naturalWidth; canvas.height = image.naturalHeight
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('This browser cannot analyze the plot image.')
+        context.drawImage(image, 0, 0)
+        curveImage = context.getImageData(0, 0, canvas.width, canvas.height)
+        if (!showOriginalPreview && processedImageUrl) {
+          extractMode = 'color'
+          curveColor = [1, 3, 5].map((index) => parseInt(reconstructionColors.curve.slice(index, index + 2), 16)) as [number, number, number]
+        } else {
+          extractMode = 'dark'
+        }
+      }
+
+      const learningPixels = learningStateRef.current?.enabled && interactionModelRef.current.featureSamples > 0
+        ? await getInteractionPixels()
+        : undefined
+      if (run !== processingRun.current) return
+      const scorePixel = learningPixels && learningPixels.width === curveImage.width && learningPixels.height === curveImage.height
+        ? (x: number, y: number) => predictRichPixelScore(interactionModelRef.current, learningPixels, x, y)
+        : undefined
+
+      const smart = smartExtractCurvesFromLayer(curveImage, {
+        spacing: learnedSampleStep,
+        curvatureBias: interactionModelRef.current.curvatureBias,
+        mode: extractMode,
+        curveColor,
+        tolerance,
+        scorePixel,
+      })
+
+      if (!smart.curves.length) {
+        showNotice(smart.warnings[0] ?? 'No curves found. Try processing the image cleanly or painting a curve region.', 'error')
+        return
+      }
+
+      const extraWarnings: string[] = []
+      if (smart.junctionCrossingsResolved > 0) {
+        extraWarnings.push(`Resolved ${smart.junctionCrossingsResolved} crossing${smart.junctionCrossingsResolved === 1 ? '' : 's'} by tangent continuity.`)
+      }
+      if (aiPixelCorrections > 0) {
+        extraWarnings.push(`Applied ${aiPixelCorrections} AI pixel refinement${aiPixelCorrections === 1 ? '' : 's'}.`)
+      }
+      stageTraceCurves({
+        curves: smart.curves.map((points) => ({ points, group: 'AI Smart' })),
+        warnings: smart.warnings,
+      }, 0, extraWarnings)
+    } catch (error) {
+      if (run === processingRun.current) showNotice(error instanceof Error ? error.message : 'Smart AI extraction failed.', 'error')
+    } finally {
+      if (run === processingRun.current) setLoading(false)
+    }
+  }
+
   const autoPaintedPoints = async () => {
     const traceImageUrl = showOriginalPreview ? sourceImageUrl : imageUrl
     if (!traceImageUrl || !imagePrepared || !brushMarks.length || loading) return
@@ -1270,7 +1366,15 @@ export default function App() {
         : !showOriginalPreview && processedImageUrl
         ? [1, 3, 5].map((index) => parseInt(reconstructionColors.curve.slice(index, index + 2), 16)) as [number, number, number]
         : undefined
-      const extraction = extractBrushGroups(context.getImageData(0, 0, canvas.width, canvas.height), groups, learnedSampleStep, tolerance, color, Boolean(isolatedCurveLayer))
+      const extraction = extractBrushGroups(
+        context.getImageData(0, 0, canvas.width, canvas.height),
+        groups,
+        learnedSampleStep,
+        tolerance,
+        color,
+        Boolean(isolatedCurveLayer),
+        interactionModelRef.current.curvatureBias,
+      )
       let learningNotice: { message: string; type: Notice['type'] } | null = null
       const manualMarks = brushMarks.filter((mark) => !mark.generated)
       const state = learningStateRef.current
@@ -2167,6 +2271,7 @@ export default function App() {
             <button className={`tool-button ${mode === 'calibrate-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'calibrate-edit' ? 'select' : 'calibrate-edit')} disabled={!imagePrepared || xAxis.points.length + yAxis.points.length === 0}><span className="tool-icon"><MoveUpRight size={16} /></span><span>Modify calibration</span><kbd>C</kbd></button>
             </>}
             {workflowStep === 'digitize' && <><div className="tool-group-label tool-gap">DIGITIZE</div>
+            <button className="tool-button" onClick={() => { void smartAutoExtractPoints() }} disabled={!imagePrepared || loading || preprocessing} title="Automatically trace all curves through crossings and place curvature-adaptive points on curve centerlines"><span className="tool-icon"><Sparkles size={16} /></span><span>Smart auto points (AI)</span></button>
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
@@ -2409,6 +2514,7 @@ export default function App() {
               {(mode === 'trace-region' || mode === 'point-edit') && <>
                 {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div></>}
                 <div className="prep-actions trace-actions">
+                  {mode === 'trace-region' && <button className="prep-apply clear-brushes" disabled={!imagePrepared || loading || preprocessing} title="Trace all detected curves cleanly through crossings with curvature-adaptive points" onClick={() => { void smartAutoExtractPoints() }}><Sparkles size={13} /> Smart auto points (AI)</button>}
                   {mode === 'trace-region' && <button className="prep-compare" disabled={!imagePrepared || !processedImageUrl || !reconstruction || needsProcess || !learningState?.enabled || ((learningState?.model.samples ?? 0) < 1 && interactionModel.featureSamples < 1) || loading} title="Requires a processed image and an enabled, trained local curve or interaction model" onClick={() => { void autoPaintWithModel() }}><Sparkles size={13} /> Auto paint (ML)</button>}
                   <button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>{mode === 'point-edit' ? 'Regenerate points' : 'Get points'}</button>
                   <button className="prep-compare clear-brushes" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button>
