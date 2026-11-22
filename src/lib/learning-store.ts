@@ -2,8 +2,8 @@ import { initialLearningModel } from './learning'
 import type { CurveComparison, LearningModel } from './learning'
 import { initialPointSpacingModel } from './point-spacing'
 import type { PointSpacingModel } from './point-spacing'
-import { initialInteractionModel, isValidInteractionModel } from './interaction-learning'
-import type { InteractionModel } from './interaction-learning'
+import { initialInteractionModel, isValidInteractionModel, isValidInteractionUpdatePayload } from './interaction-learning'
+import type { InteractionModel, InteractionUpdatePayload } from './interaction-learning'
 
 export interface TrainingSample {
   id: string
@@ -14,6 +14,7 @@ export interface TrainingSample {
   target?: string
   comparison?: CurveComparison
   spacingTarget?: number
+  interactionUpdate?: InteractionUpdatePayload
 }
 
 export interface LearningState {
@@ -29,6 +30,8 @@ export interface LearningStore {
   acknowledgePointSpacing(id: string, model: PointSpacingModel): Promise<void>
   loadInteractionModel(): Promise<InteractionModel>
   saveInteractionModel(model: InteractionModel): Promise<void>
+  saveInteractionSample(sample: TrainingSample, model: InteractionModel): Promise<void>
+  acknowledgeInteraction(id: string, model: InteractionModel): Promise<void>
   hasSample(id: string): Promise<boolean>
   saveSample(sample: TrainingSample, model: LearningModel): Promise<void>
   pendingSamples(): Promise<TrainingSample[]>
@@ -140,6 +143,25 @@ export function createLocalLearningStore(): LearningStore {
     async saveInteractionModel(model) {
       if (!isValidInteractionModel(model)) throw new Error('Invalid local interaction learning model.')
       await transaction(['settings'], 'readwrite', async (tx) => {
+        tx.objectStore('settings').put(model, 'interaction-model')
+      })
+    },
+    async saveInteractionSample(sample, model) {
+      if (!isValidInteractionModel(model) || !sample.updateId || !isValidInteractionUpdatePayload(sample.interactionUpdate)) {
+        throw new Error('Invalid interaction learning update.')
+      }
+      await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
+        tx.objectStore('samples').add(sample)
+        tx.objectStore('settings').put(model, 'interaction-model')
+      })
+    },
+    async acknowledgeInteraction(id, model) {
+      if (!isValidInteractionModel(model)) throw new Error('Invalid online interaction learning model.')
+      await transaction(['samples', 'settings'], 'readwrite', async (tx) => {
+        const samples = tx.objectStore('samples')
+        const sample = await get<TrainingSample>(samples, id)
+        if (!sample?.interactionUpdate) throw new Error('The pending interaction update no longer exists.')
+        samples.put({ ...sample, status: 'sent' })
         tx.objectStore('settings').put(model, 'interaction-model')
       })
     },

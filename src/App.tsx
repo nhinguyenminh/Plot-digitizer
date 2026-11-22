@@ -27,9 +27,10 @@ import type { WorkbookChart } from './lib/excel-export'
 import { History } from './lib/history'
 import { initialLearningModel } from './lib/learning'
 import {
-  effectiveSampleStep, initialInteractionModel, learnFromHealingApplied, learnFromLayerComparison,
-  learnFromPointAdded, learnFromPointDeleted, learnFromPointMoved, learnFromPointsSnapped,
-  predictEnhancedLearningEdits, predictRichPixelScore, preferredHealingChoice, totalInteractionCount,
+  createInteractionUpdatePayload, effectiveSampleStep, initialInteractionModel, learnFromHealingApplied,
+  learnFromLayerComparison, learnFromPointAdded, learnFromPointDeleted, learnFromPointMoved,
+  learnFromPointsSnapped, predictEnhancedLearningEdits, predictRichPixelScore, preferredHealingChoice,
+  totalInteractionCount,
 } from './lib/interaction-learning'
 import type { InteractionModel } from './lib/interaction-learning'
 import { insertPointInDataset, snapDatasetPointsToCurve } from './lib/point-tools'
@@ -250,7 +251,6 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
-  const isDesktop = window.plotlineDesktop === true
   const [learningLoading, setLearningLoading] = useState(true)
   const [learningWorking, setLearningWorking] = useState(false)
   const [learningState, setLearningState] = useState<LearningState | null>(null)
@@ -262,10 +262,9 @@ export default function App() {
   const [lastComparison, setLastComparison] = useState<[number, number, number, number] | null>(null)
   const [syncing, setSyncing] = useState(false)
   const onlineConfiguration = useMemo(() => {
-    if (isDesktop) return { config: null, error: null }
     try { return { config: readOnlineLearningConfig(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY), error: null } }
     catch (error) { return { config: null, error: error instanceof Error ? error.message : 'Invalid Supabase configuration.' } }
-  }, [isDesktop])
+  }, [])
   const [projectName, setProjectName] = useState('Untitled project')
   const [charts, setCharts] = useState<ChartRecord[]>(() => [{ id: crypto.randomUUID(), name: 'Chart 1', state: blankChart() }])
   const [activeChartId, setActiveChartId] = useState(() => charts[0].id)
@@ -451,9 +450,9 @@ export default function App() {
       }
     }).finally(() => { if (active) setLearningLoading(false) })
     return () => { active = false }
-  }, [isDesktop])
+  }, [])
 
-  const persistInteractionUpdate = (updater: (current: InteractionModel) => InteractionModel) => {
+  const persistInteractionUpdate = (updater: (current: InteractionModel) => InteractionModel, healingChoice?: number) => {
     if (!learningStateRef.current?.enabled) return
     const current = interactionModelRef.current
     const next = updater(current)
@@ -461,7 +460,24 @@ export default function App() {
     interactionModelRef.current = next
     setInteractionModel(next)
     const store = learningStore.current
-    if (store) {
+    if (!store) return
+    const config = onlineConfiguration.config
+    const payload = config ? createInteractionUpdatePayload(current, next, healingChoice) : null
+    if (config && payload) {
+      const sample = {
+        id: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        delta: [],
+        updateId: crypto.randomUUID(),
+        status: 'pending' as const,
+        target: config.url,
+        interactionUpdate: payload,
+      }
+      void store.saveInteractionSample(sample, next)
+        .then(() => store.pendingSamples())
+        .then((pending) => setPendingUpdates(pending.length))
+        .catch(() => undefined)
+    } else {
       void store.saveInteractionModel(next).catch(() => undefined)
     }
   }
@@ -500,12 +516,14 @@ export default function App() {
   const synchronizeLearning = () => {
     const config = onlineConfiguration.config
     const store = learningStore.current
-    if (isDesktop || !config || !store || !learningStateRef.current?.enabled || learningWorkRef.current || syncRef.current) return
+    if (!config || !store || !learningStateRef.current?.enabled || learningWorkRef.current || syncRef.current) return
     setSyncing(true)
-    const operation = syncOnlineLearning(store, config).then(({ model, pointSpacingModel, pending }) => {
+    const operation = syncOnlineLearning(store, config).then(({ model, pointSpacingModel, interactionModel: syncedInteraction, pending }) => {
       const current = learningStateRef.current
       if (current) { const state = { ...current, model }; learningStateRef.current = state; setLearningState(state) }
       setPointSpacingModel(pointSpacingModel)
+      interactionModelRef.current = syncedInteraction
+      setInteractionModel(syncedInteraction)
       setPendingUpdates(pending); setSyncError(null)
     }).catch(async (error: unknown) => {
       setSyncError(error instanceof Error ? error.message : 'Could not synchronize learning updates.')
@@ -516,12 +534,12 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (isDesktop || !learningState?.enabled || !onlineConfiguration.config) return
+    if (!learningState?.enabled || !onlineConfiguration.config) return
     synchronizeLearning()
     const timer = window.setInterval(synchronizeLearning, 30000)
     window.addEventListener('online', synchronizeLearning)
     return () => { window.clearInterval(timer); window.removeEventListener('online', synchronizeLearning) }
-  }, [isDesktop, learningState?.enabled, onlineConfiguration.config, pendingUpdates])
+  }, [learningState?.enabled, onlineConfiguration.config, pendingUpdates])
 
   const projectBusy = Boolean(pendingTrace || rotationPreview || preprocessing || loading || gridDetecting || exporting || learningLoading || learningWorking)
   const changeHistory = (direction: 'undo' | 'redo') => {
@@ -692,7 +710,7 @@ export default function App() {
 
   const applyHealing = () => {
     if (healPreview && updateCorrections([...corrections, { points: healPreview, erase: false, layer: 'curve', width: drawWidth }])) {
-      persistInteractionUpdate((current) => learnFromHealingApplied(current, healChoice))
+      persistInteractionUpdate((current) => learnFromHealingApplied(current, healChoice), healChoice)
       setHealMark(null); setHealOptions([]); setShowOriginalPreview(false)
       showNotice('Connection applied. Inspect it against the original; use Undo if needed.')
     }
@@ -736,20 +754,30 @@ export default function App() {
         if (!state?.enabled) throw new Error('Learning is disabled.')
         const example = await createLearningExample(sourceImageUrl, reconstruction, corrections, reconstructionWidths, state.model)
         if (!(await store.hasSample(example.sample.id))) {
-          if (!isDesktop && example.updated) {
+          if (onlineConfiguration.config && example.updated) {
             example.sample.updateId = crypto.randomUUID(); example.sample.status = 'pending'
-            example.sample.target = onlineConfiguration.config?.url
+            example.sample.target = onlineConfiguration.config.url
           }
           await store.saveSample(example.sample, example.model)
           const nextState = { ...state, model: example.model }
           learningStateRef.current = nextState; setLearningState(nextState)
           if (example.updated) {
-            const nextInteraction = learnFromLayerComparison(interactionModelRef.current, example.pixels, example.corrected, 'reconstruction')
+            const beforeInteraction = interactionModelRef.current
+            const nextInteraction = learnFromLayerComparison(beforeInteraction, example.pixels, example.corrected, 'reconstruction')
             interactionModelRef.current = nextInteraction; setInteractionModel(nextInteraction)
-            await store.saveInteractionModel(nextInteraction)
+            const interactionPayload = onlineConfiguration.config ? createInteractionUpdatePayload(beforeInteraction, nextInteraction) : null
+            if (onlineConfiguration.config && interactionPayload) {
+              await store.saveInteractionSample({
+                id: crypto.randomUUID(), createdAt: new Date().toISOString(), delta: [],
+                updateId: crypto.randomUUID(), status: 'pending', target: onlineConfiguration.config.url,
+                interactionUpdate: interactionPayload,
+              }, nextInteraction)
+            } else {
+              await store.saveInteractionModel(nextInteraction)
+            }
           }
-          if (!isDesktop && example.updated) setPendingUpdates((await store.pendingSamples()).length)
-          showNotice(example.updated ? isDesktop ? 'Image confirmed and local curve model updated.' : 'Image confirmed; numeric update saved for synchronization.' : 'Image confirmed. No curve edits were available to update the model.')
+          if (onlineConfiguration.config && example.updated) setPendingUpdates((await store.pendingSamples()).length)
+          showNotice(example.updated ? onlineConfiguration.config ? 'Image confirmed; numeric update saved for Supabase synchronization.' : 'Image confirmed and local curve model updated.' : 'Image confirmed. No curve edits were available to update the model.')
         } else showNotice('Image confirmed. This learning sample was already saved.')
         if (example.sample.comparison) setLastComparison(example.sample.comparison.counts)
       } catch (error) {
@@ -1280,22 +1308,32 @@ export default function App() {
             }
             const example = await createPaintLearningExample(paintPixels, additions, removals, current.model)
             if (example.updated && !(await store.hasSample(example.sample.id))) {
-              if (!isDesktop) {
+              if (onlineConfiguration.config) {
                 example.sample.updateId = crypto.randomUUID()
                 example.sample.status = 'pending'
-                example.sample.target = onlineConfiguration.config?.url
+                example.sample.target = onlineConfiguration.config.url
               }
               await store.saveSample(example.sample, example.model)
               const nextState = { ...current, model: example.model }
               learningStateRef.current = nextState
               setLearningState(nextState)
-              const nextInteraction = learnFromLayerComparison(interactionModelRef.current, paintPixels, example.corrected, 'paint')
+              const beforeInteraction = interactionModelRef.current
+              const nextInteraction = learnFromLayerComparison(beforeInteraction, paintPixels, example.corrected, 'paint')
               interactionModelRef.current = nextInteraction
               setInteractionModel(nextInteraction)
-              await store.saveInteractionModel(nextInteraction)
-              if (!isDesktop) setPendingUpdates((await store.pendingSamples()).length)
+              const interactionPayload = onlineConfiguration.config ? createInteractionUpdatePayload(beforeInteraction, nextInteraction) : null
+              if (onlineConfiguration.config && interactionPayload) {
+                await store.saveInteractionSample({
+                  id: crypto.randomUUID(), createdAt: new Date().toISOString(), delta: [],
+                  updateId: crypto.randomUUID(), status: 'pending', target: onlineConfiguration.config.url,
+                  interactionUpdate: interactionPayload,
+                }, nextInteraction)
+              } else {
+                await store.saveInteractionModel(nextInteraction)
+              }
+              if (onlineConfiguration.config) setPendingUpdates((await store.pendingSamples()).length)
               if (example.sample.comparison) setLastComparison(example.sample.comparison.counts)
-              learningNotice = { message: isDesktop ? 'Painted edits learned by the local curve model.' : 'Painted edits saved for local learning and online synchronization.', type: 'success' }
+              learningNotice = { message: onlineConfiguration.config ? 'Painted edits saved for local learning and Supabase synchronization.' : 'Painted edits learned by the local curve model.', type: 'success' }
             }
           }
         } catch (error) {
@@ -1864,7 +1902,7 @@ export default function App() {
           if (spacingUpdate && spacingUpdate.samples > pointSpacingModel.samples) {
             const store = learningStore.current
             if (!store) throw new Error('Local learning storage is unavailable.')
-            if (!isDesktop && onlineConfiguration.config) {
+            if (onlineConfiguration.config) {
               const target = onlineConfiguration.config.url
               const samples = spacingTargets.map((spacingTarget) => ({
                 id: crypto.randomUUID(), createdAt: new Date().toISOString(), delta: [],
@@ -1877,7 +1915,7 @@ export default function App() {
               await store.savePointSpacingModel(spacingUpdate)
             }
             setPointSpacingModel(spacingUpdate)
-            showNotice(!isDesktop && onlineConfiguration.config
+            showNotice(onlineConfiguration.config
               ? `Queued ${spacingTargets.length} point-spacing update${spacingTargets.length === 1 ? '' : 's'} for Supabase.`
               : `Saved point-spacing learning from ${spacingTargets.length} edited dataset${spacingTargets.length === 1 ? '' : 's'}.`)
           }
@@ -2148,7 +2186,7 @@ export default function App() {
             <button className="tool-button" onClick={() => imageInput.current?.click()}><span className="tool-icon"><ImagePlus size={16} /></span><span>Replace image</span></button>
             <div className="transform-grid"><button title="Rotate left" aria-label="Rotate left" onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /></button><button title="Rotate right" aria-label="Rotate right" onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /></button><button title="Flip horizontal" aria-label="Flip horizontal" onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /></button><button title="Flip vertical" aria-label="Flip vertical" onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /></button></div>
           </div>
-          <div className="rail-bottom"><span className="connection-indicator" /><span>{isDesktop ? 'Learning stays on this device' : 'Cloud saves include images'}</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
+          <div className="rail-bottom"><span className="connection-indicator" /><span>{onlineConfiguration.config ? 'Supabase AI sync active' : 'Learning stays on this device'}</span><button title="Settings" aria-label="Settings" onClick={() => setActivePanel(activePanel === 'settings' ? 'data' : 'settings')}><Settings2 size={15} /></button></div>
         </aside>
 
         <section className="center-workspace" aria-label="Plot workspace">
@@ -2389,8 +2427,8 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">DIGITIZING</span><h2>Manual point editing</h2></div></div><p className="section-copy">By default, manually added points are inserted between their nearest X neighbors instead of appended to the end of the dataset.</p><label className="format-control"><span>Insert manual points between X neighbors</span><input aria-label="Settings insert manual points between X neighbors" type="checkbox" checked={insertPointsByX} onChange={(event) => setInsertPointsByX(event.target.checked)} /></label><p className="section-copy">Snap-to-curve search radius: {Math.round(interactionModel.snapRadius)} px (adapts from manual drags &amp; snaps).</p></section>
-            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{isDesktop ? 'Local learning' : 'Shared learning'}</h2></div></div>
-              <p className="section-copy">{isDesktop ? 'Learning stores numeric comparisons and interaction models locally, not new training images. Images saved by older versions remain until deleted.' : 'Shared learning sends numeric curve comparisons and model updates to Supabase, not images. Upgraded interaction learning (point edits, moves, deletions, snaps and healing choices) stays local on this device.'} Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{onlineConfiguration.config ? 'Shared learning' : 'Local learning'}</h2></div></div>
+              <p className="section-copy">{onlineConfiguration.config ? 'Learning syncs bounded numeric model updates (curve, point-spacing, and interaction AI) to Supabase, never images or raw coordinates. Updates are queued offline in IndexedDB and synced automatically.' : 'Learning stores numeric models and interaction preferences locally in IndexedDB, not training images.'} Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
               {learningError ? <p className="section-copy" role="alert">Storage unavailable: {learningError}. Restart the app to retry.</p> : learningState ? <>
                 <label className="format-control"><span>Enable learning</span><input type="checkbox" disabled={syncing} checked={learningState.enabled} onChange={(event) => { void setLearningEnabled(event.target.checked) }} /></label>
                 <div className="ai-stats-grid">
@@ -2402,16 +2440,15 @@ export default function App() {
                 <p className="ai-breakdown">{interactionModel.stats.pointsAdded} added · {interactionModel.stats.pointsMoved} moved · {interactionModel.stats.pointsDeleted} deleted · {interactionModel.stats.pointsSnapped} snapped · {interactionModel.stats.healingApplied} healed</p>
                 <p className="section-copy">Preferred gap healing: <strong>{['Straight', 'Gentle', 'Tangent curved'][preferredHealingChoice(interactionModel)]}</strong></p>
                 {lastComparison && <p className="section-copy">Last curve comparison: {lastComparison[1]} pixels added, {lastComparison[2]} removed, {lastComparison[3]} retained. Counts use exact pixel overlap.</p>}
-                {!isDesktop && <><p className="section-copy">Pending online updates: {pendingUpdates}{syncing ? ' · Synchronizing…' : ''}</p>
-                  {(onlineConfiguration.error || !onlineConfiguration.config) && <p className="section-copy" role="alert">{onlineConfiguration.error ?? 'Supabase is not configured; updates remain on this device.'}</p>}
-                  {syncError && <p className="section-copy" role="alert">Synchronization failed: {syncError} Updates remain queued.</p>}
-                  <button className="settings-action" disabled={!learningState.enabled || !onlineConfiguration.config || syncing} onClick={synchronizeLearning}>Retry synchronization</button>
-                </>}
+                <p className="section-copy">Pending online updates: {pendingUpdates}{syncing ? ' · Synchronizing…' : ''}</p>
+                {(onlineConfiguration.error || !onlineConfiguration.config) && <p className="section-copy" role="alert">{onlineConfiguration.error ?? 'Supabase is not configured; updates remain on this device.'}</p>}
+                {syncError && <p className="section-copy" role="alert">Synchronization failed: {syncError} Updates remain queued.</p>}
+                <button className="settings-action" disabled={!learningState.enabled || !onlineConfiguration.config || syncing} onClick={synchronizeLearning}>Retry synchronization</button>
                 <button className="settings-action" disabled={syncing} onClick={() => { void clearLearning() }}>Delete local learning data</button>
               </> : <p className="section-copy">Loading local learning settings…</p>}
             </section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">OUTPUT</span><h2>Data formatting</h2></div></div><p className="section-copy">Apply sort order and numeric precision to generated exports.</p><label className="format-control"><span>Sort points by</span><select aria-label="Export sort order" value={sortBy} onChange={(event) => setSortBy(event.target.value as 'x' | 'y')}><option value="x">X ascending</option><option value="y">Y ascending</option></select></label><label className="format-control precision-control"><span>Significant digits <strong>{precision}</strong></span><input aria-label="Export precision" type="range" min="2" max="12" step="1" value={precision} onChange={(event) => setPrecision(Number(event.target.value))} /></label></section>
-            <section className="settings-disclaimer"><CircleHelp size={16} /><p>Project images and extracted datasets are not uploaded. {isDesktop ? 'Learning stays on this device.' : 'When enabled, numeric learning updates may be sent online.'}</p></section>
+            <section className="settings-disclaimer"><CircleHelp size={16} /><p>Project images and extracted datasets are not uploaded by learning. {onlineConfiguration.config ? 'When enabled, bounded numeric learning updates sync to Supabase.' : 'Learning stays on this device.'}</p></section>
           </div>}
         </aside>
       </div>

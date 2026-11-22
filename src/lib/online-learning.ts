@@ -1,6 +1,8 @@
 import type { LearningModel } from './learning'
 import type { LearningStore } from './learning-store'
 import type { PointSpacingModel } from './point-spacing'
+import { isValidInteractionModel, isValidInteractionUpdatePayload } from './interaction-learning.ts'
+import type { InteractionModel } from './interaction-learning.ts'
 
 export interface OnlineLearningConfig { url: string; key: string }
 
@@ -57,14 +59,32 @@ export async function callPointSpacingRpc(config: OnlineLearningConfig, name: st
   return model
 }
 
-export async function syncOnlineLearning(store: LearningStore, config: OnlineLearningConfig): Promise<{ model: LearningModel; pointSpacingModel: PointSpacingModel; pending: number }> {
+export async function callInteractionRpc(config: OnlineLearningConfig, name: string, args: object): Promise<InteractionModel> {
+  const response = await fetch(`${config.url}/rest/v1/rpc/${name}`, {
+    method: 'POST',
+    headers: { apikey: config.key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!response.ok) throw new Error(`Supabase interaction-learning request failed (HTTP ${response.status}).${response.status === 404 ? ' Apply supabase/interaction-learning.sql in the Supabase SQL editor.' : ''}`)
+  const model: unknown = await response.json()
+  if (!isValidInteractionModel(model)) throw new Error('Supabase returned an invalid interaction learning model.')
+  return model
+}
+
+export async function syncOnlineLearning(store: LearningStore, config: OnlineLearningConfig): Promise<{ model: LearningModel; pointSpacingModel: PointSpacingModel; interactionModel: InteractionModel; pending: number }> {
   const pending = await store.pendingSamples()
   let model: LearningModel | null = null
   let pointSpacingModel: PointSpacingModel | null = null
+  let interactionModel: InteractionModel | null = null
   for (const sample of pending) {
     if (!sample.updateId) throw new Error('Invalid queued learning update.')
     if (sample.target && sample.target !== config.url) throw new Error('A queued update belongs to a different Supabase project.')
-    if (sample.spacingTarget !== undefined) {
+    if (sample.interactionUpdate !== undefined) {
+      if (!isValidInteractionUpdatePayload(sample.interactionUpdate)) throw new Error('Invalid queued interaction learning update.')
+      interactionModel = await callInteractionRpc(config, 'plotline_submit_interaction_update', { p_id: sample.updateId, p_update: sample.interactionUpdate })
+      await store.acknowledgeInteraction(sample.id, interactionModel)
+    } else if (sample.spacingTarget !== undefined) {
       if (!Number.isFinite(sample.spacingTarget) || sample.spacingTarget < 1.05 || sample.spacingTarget > 1.2) throw new Error('Invalid queued point-spacing update.')
       pointSpacingModel = await callPointSpacingRpc(config, 'plotline_submit_point_spacing_update', { p_id: sample.updateId, p_target: sample.spacingTarget })
       await store.acknowledgePointSpacing(sample.id, pointSpacingModel)
@@ -84,5 +104,9 @@ export async function syncOnlineLearning(store: LearningStore, config: OnlineLea
     pointSpacingModel = await callPointSpacingRpc(config, 'plotline_get_point_spacing_model', {})
     await store.savePointSpacingModel(pointSpacingModel)
   }
-  return { model, pointSpacingModel, pending: (await store.pendingSamples()).length }
+  if (!interactionModel) {
+    interactionModel = await callInteractionRpc(config, 'plotline_get_interaction_model', {})
+    await store.saveInteractionModel(interactionModel)
+  }
+  return { model, pointSpacingModel, interactionModel, pending: (await store.pendingSamples()).length }
 }

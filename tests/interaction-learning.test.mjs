@@ -2,9 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { initialLearningModel } from '../src/lib/learning.ts'
 import {
+  createInteractionUpdatePayload,
   effectiveSampleStep,
   initialInteractionModel,
   isValidInteractionModel,
+  isValidInteractionUpdatePayload,
   learnFromHealingApplied,
   learnFromLayerComparison,
   learnFromPointAdded,
@@ -137,4 +139,16 @@ test('upgraded 14-feature model learns diagonal colored curves and predicts refi
   assert.ok(addedRight >= 25, `expected >= 25 diagonal curve additions, got ${addedRight}`)
   assert.ok(erasedRight >= 25, `expected >= 25 grid remnant erasures, got ${erasedRight}`)
   assert.equal(mistakes, 0)
+})
+
+test('createInteractionUpdatePayload creates bounded sync deltas and validates payloads', () => {
+  const before = initialInteractionModel()
+  assert.equal(createInteractionUpdatePayload(before, before), null)
+  const after = learnFromHealingApplied(before, 2)
+  const payload = createInteractionUpdatePayload(before, after, 2)
+  assert.ok(payload)
+  assert.equal(isValidInteractionUpdatePayload(payload), true)
+  assert.equal(payload.healingChoice, 2)
+  assert.equal(payload.statsDelta.healingApplied, 1)
+  assert.equal(isValidInteractionUpdatePayload({ ...payload, featureDelta: [99] }), false)
 })

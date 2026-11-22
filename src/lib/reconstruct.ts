@@ -36,25 +36,53 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   const h = bottom - top + 1
   if (w < 20 || h < 20) throw new Error('Select a plot region at least 20 pixels wide and high.')
   if (w * h > 4_000_000) throw new Error('Select a smaller region or resize the image below 4 megapixels.')
-  const ink = new Uint8Array(w * h)
+  const histogram = new Uint32Array(256)
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const source = ((top + y) * width + left + x) * 4
     const alpha = data[source + 3] / 255
-    if (255 - (255 - Math.min(data[source], data[source + 1], data[source + 2])) * alpha < 185) ink[y * w + x] = 1
+    const level = Math.round(255 - (255 - Math.min(data[source], data[source + 1], data[source + 2])) * alpha)
+    histogram[Math.max(0, Math.min(255, level))]++
+  }
+  const targetRank = Math.floor(w * h * 0.85)
+  let cumulative = 0
+  let paperLevel = 255
+  for (let level = 0; level < 256; level++) {
+    cumulative += histogram[level]
+    if (cumulative >= targetRank) { paperLevel = level; break }
+  }
+  const inkThreshold = paperLevel >= 245 ? 185 : Math.max(120, Math.min(185, paperLevel - 55))
+
+  const ink = new Uint8Array(w * h)
+  const coloredCurve = new Uint8Array(w * h)
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const source = ((top + y) * width + left + x) * 4
+    const alpha = data[source + 3] / 255
+    const minChannel = Math.min(data[source], data[source + 1], data[source + 2])
+    const maxChannel = Math.max(data[source], data[source + 1], data[source + 2])
+    if (255 - (255 - minChannel) * alpha < inkThreshold) {
+      const idx = y * w + x
+      ink[idx] = 1
+      if (alpha >= 0.5 && maxChannel - minChannel >= 32) coloredCurve[idx] = 1
+    }
   }
   const findLines = (horizontal: boolean, manual: number[], axis: number | null) => {
     const length = horizontal ? h : w
     const span = horizontal ? w : h
-    const candidates: { position: number; start: number; end: number }[] = []
+    const candidates: { position: number; start: number; end: number; strength: number }[] = []
     let start = -1; let weighted = 0; let total = 0
     for (let p = 0; p <= length; p++) {
       let score = 0
-      if (p < length) for (let q = 0; q < span; q++) score += ink[horizontal ? p * w + q : q * w + p]
+      if (p < length) {
+        for (let q = 0; q < span; q++) {
+          const idx = horizontal ? p * w + q : q * w + p
+          if (ink[idx]) score += coloredCurve[idx] ? 0.15 : 1
+        }
+      }
       if (score >= span * 0.35) {
         if (start < 0) start = p
         weighted += p * score; total += score
       } else if (start >= 0) {
-        candidates.push({ position: Math.round(weighted / total), start, end: p - 1 })
+        candidates.push({ position: Math.round(weighted / total), start, end: p - 1, strength: total })
         start = -1; weighted = 0; total = 0
       }
     }
@@ -92,9 +120,17 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       lines.push(axis)
       lines.sort((a, b) => a - b)
     }
+    let inferredAxis = horizontal ? lines[lines.length - 1] : lines[0]
+    if (axis === null && lines.length >= 3 && candidates.length >= 3) {
+      const strengthAt = (linePos: number) => candidates.find((candidate) => Math.abs(candidate.position + min - linePos) <= 3)?.strength ?? 0
+      const outer = horizontal ? lines[lines.length - 1] : lines[0]
+      const inner = horizontal ? lines[lines.length - 2] : lines[1]
+      if (strengthAt(inner) > strengthAt(outer) * 1.55) inferredAxis = inner
+    }
     return {
       lines,
       mask,
+      inferredAxis,
     }
   }
   const horizontalResult = findLines(true, guides.horizontal, options.axisGuides.horizontal)
@@ -103,7 +139,11 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   const vertical = verticalResult.lines
   const hMask = horizontalResult.mask
   const vMask = verticalResult.mask
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (hMask[y] || vMask[x]) ink[y * w + x] = 0
+  // Clear neutral grid pixels while keeping colored curve pixels intact right across grid intersections.
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const idx = y * w + x
+    if ((hMask[y] || vMask[x]) && !coloredCurve[idx]) ink[idx] = 0
+  }
 
   const visited = new Uint8Array(w * h)
   const queue = new Int32Array(w * h)
@@ -128,11 +168,14 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       }
     }
     const extent = Math.hypot(maxX - minX, maxY - minY)
+    const bboxW = maxX - minX + 1
+    const bboxH = maxY - minY + 1
+    const compactGlyph = !touchesGrid && bboxW <= 14 && bboxH <= 14 && tail / (bboxW * bboxH) >= 0.45 && Math.max(bboxW, bboxH) <= minimumExtent * 1.15
     const edgeTick = touchesGrid && (
       (maxX - minX <= 3 && maxY - minY <= 12 && outerHorizontal.some((line) => Math.min(Math.abs(minY - line), Math.abs(maxY - line)) <= 5))
       || (maxY - minY <= 3 && maxX - minX <= 12 && outerVertical.some((line) => Math.min(Math.abs(minX - line), Math.abs(maxX - line)) <= 5))
     )
-    if (edgeTick || (extent < minimumExtent && !(touchesGrid && extent >= 6))) {
+    if (edgeTick || compactGlyph || (extent < minimumExtent && !(touchesGrid && extent >= 6))) {
       for (let index = 0; index < tail; index++) ink[queue[index]] = 0
     }
   }
@@ -291,7 +334,7 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   bridgeLines(vMask, left, false)
   bridgeLines(hMask, top, true)
   return { width, height, region: { x: left, y: top, width: right - left, height: bottom - top }, horizontal, vertical, curves, estimatedCurves,
-    horizontalAxis: options.axisGuides.horizontal ?? horizontal[horizontal.length - 1], verticalAxis: options.axisGuides.vertical ?? vertical[0] }
+    horizontalAxis: options.axisGuides.horizontal ?? horizontalResult.inferredAxis, verticalAxis: options.axisGuides.vertical ?? verticalResult.inferredAxis }
 }
 
 export type UpscaleSetting = { preset: 'original' | 'hd' | 'fullhd' | 'custom'; longEdge: number }

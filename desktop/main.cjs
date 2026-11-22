@@ -38,7 +38,7 @@ app.whenReady().then(() => {
     const url = new URL(details.url)
     const local = ['plotline:', 'file:', 'data:', 'blob:', 'devtools:'].includes(url.protocol)
     const cloud = cloudOrigin && url.origin === cloudOrigin && details.resourceType === 'xhr'
-      && (url.pathname.startsWith('/auth/v1/') || url.pathname === '/rest/v1/plotline_projects')
+      && (url.pathname.startsWith('/auth/v1/') || url.pathname === '/rest/v1/plotline_projects' || url.pathname.startsWith('/rest/v1/rpc/plotline_'))
     callback({ cancel: !local && !cloud })
   })
 

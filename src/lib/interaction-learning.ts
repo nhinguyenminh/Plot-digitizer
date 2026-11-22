@@ -26,6 +26,16 @@ export interface InteractionModel {
   updatedAt: string | null
 }
 
+export interface InteractionUpdatePayload {
+  featureDelta: number[]
+  featureSamplesDelta: number
+  spacingTarget: number | null
+  curvatureDelta: number
+  snapTarget: number | null
+  healingChoice: number | null
+  statsDelta: InteractionStats
+}
+
 export interface RichLabeledExample {
   features: number[]
   label: 0 | 1
@@ -87,6 +97,69 @@ export function totalInteractionCount(model: InteractionModel): number {
   const { stats } = model
   return stats.pointsAdded + stats.pointsMoved + stats.pointsDeleted
     + stats.pointsSnapped + stats.healingApplied + stats.paintSessions + stats.reconstructionEdits
+}
+
+export function createInteractionUpdatePayload(
+  before: InteractionModel,
+  after: InteractionModel,
+  healingChoice?: number,
+): InteractionUpdatePayload | null {
+  const featureDelta = after.featureWeights.map((weight, index) =>
+    Math.round(clamp(weight - before.featureWeights[index], -0.5, 0.5) * 10000) / 10000,
+  )
+  const featureSamplesDelta = Math.min(50, Math.max(0, after.featureSamples - before.featureSamples))
+  const spacingTarget = after.spacingSamples > before.spacingSamples
+    ? Math.round(clamp(after.spacingFactor, 0.65, 1.5) * 10000) / 10000
+    : null
+  const curvatureDelta = Math.round(clamp(after.curvatureBias - before.curvatureBias, -0.2, 0.2) * 10000) / 10000
+  const snapTarget = after.snapSamples > before.snapSamples
+    ? Math.round(clamp(after.snapRadius, MIN_SNAP_RADIUS, MAX_SNAP_RADIUS) * 10) / 10
+    : null
+  const validHealingChoice = healingChoice !== undefined && Number.isInteger(healingChoice) && healingChoice >= 0 && healingChoice <= 2
+    ? healingChoice
+    : null
+  const statsDelta: InteractionStats = {
+    pointsAdded: Math.min(1000, Math.max(0, after.stats.pointsAdded - before.stats.pointsAdded)),
+    pointsMoved: Math.min(1000, Math.max(0, after.stats.pointsMoved - before.stats.pointsMoved)),
+    pointsDeleted: Math.min(1000, Math.max(0, after.stats.pointsDeleted - before.stats.pointsDeleted)),
+    pointsSnapped: Math.min(1000, Math.max(0, after.stats.pointsSnapped - before.stats.pointsSnapped)),
+    healingApplied: Math.min(100, Math.max(0, after.stats.healingApplied - before.stats.healingApplied)),
+    paintSessions: Math.min(100, Math.max(0, after.stats.paintSessions - before.stats.paintSessions)),
+    reconstructionEdits: Math.min(100, Math.max(0, after.stats.reconstructionEdits - before.stats.reconstructionEdits)),
+  }
+  const hasStats = Object.values(statsDelta).some((count) => count > 0)
+  const hasFeature = featureSamplesDelta > 0 || featureDelta.some((value) => Math.abs(value) > 0)
+  if (!hasStats && !hasFeature && spacingTarget === null && Math.abs(curvatureDelta) === 0
+    && snapTarget === null && validHealingChoice === null) {
+    return null
+  }
+  return {
+    featureDelta,
+    featureSamplesDelta,
+    spacingTarget,
+    curvatureDelta,
+    snapTarget,
+    healingChoice: validHealingChoice,
+    statsDelta,
+  }
+}
+
+export function isValidInteractionUpdatePayload(value: unknown): value is InteractionUpdatePayload {
+  if (!value || typeof value !== 'object') return false
+  const payload = value as Partial<InteractionUpdatePayload>
+  if (!Array.isArray(payload.featureDelta) || payload.featureDelta.length !== RICH_FEATURE_COUNT
+    || !payload.featureDelta.every((item) => Number.isFinite(item) && Math.abs(item) <= 0.5)) return false
+  if (!Number.isInteger(payload.featureSamplesDelta) || (payload.featureSamplesDelta ?? -1) < 0 || (payload.featureSamplesDelta ?? 99) > 50) return false
+  if (payload.spacingTarget !== null && (!Number.isFinite(payload.spacingTarget) || (payload.spacingTarget ?? 0) < 0.65 || (payload.spacingTarget ?? 2) > 1.5)) return false
+  if (!Number.isFinite(payload.curvatureDelta) || Math.abs(payload.curvatureDelta ?? 99) > 0.2) return false
+  if (payload.snapTarget !== null && (!Number.isFinite(payload.snapTarget) || (payload.snapTarget ?? 0) < MIN_SNAP_RADIUS || (payload.snapTarget ?? 99) > MAX_SNAP_RADIUS)) return false
+  if (payload.healingChoice !== null && (!Number.isInteger(payload.healingChoice) || (payload.healingChoice ?? -1) < 0 || (payload.healingChoice ?? 9) > 2)) return false
+  const stats = payload.statsDelta
+  if (!stats || typeof stats !== 'object') return false
+  const bounded = (count: unknown, max: number) => Number.isInteger(count) && (count as number) >= 0 && (count as number) <= max
+  return bounded(stats.pointsAdded, 1000) && bounded(stats.pointsMoved, 1000) && bounded(stats.pointsDeleted, 1000)
+    && bounded(stats.pointsSnapped, 1000) && bounded(stats.healingApplied, 100)
+    && bounded(stats.paintSessions, 100) && bounded(stats.reconstructionEdits, 100)
 }
 
 function sourceDarkness(data: Uint8ClampedArray, index: number): number {

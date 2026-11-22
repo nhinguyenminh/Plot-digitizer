@@ -1,10 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readOnlineLearningConfig, syncOnlineLearning } from '../src/lib/online-learning.ts'
+import { initialInteractionModel } from '../src/lib/interaction-learning.ts'
 
 const config = { url: 'https://example.supabase.co', key: 'sb_publishable_test' }
 const model = { version: 1, weights: [-4, 0, 8, 0, 0, 0, 0, 0, 0], samples: 1 }
 const pointSpacingModel = { version: 1, factor: 1.1, samples: 3 }
+const interactionModel = {
+  ...initialInteractionModel(),
+  featureSamples: 2,
+  spacingFactor: 0.94,
+  spacingSamples: 1,
+  snapRadius: 12.5,
+  snapSamples: 1,
+  stats: { pointsAdded: 2, pointsMoved: 1, pointsDeleted: 0, pointsSnapped: 3, healingApplied: 1, paintSessions: 0, reconstructionEdits: 0 },
+}
 const sample = (id) => ({ id, updateId: `${id}-uuid`, delta: Array(9).fill(0.1), status: 'pending' })
 
 test('requires a publishable key and a safe project URL', () => {
@@ -23,12 +33,15 @@ test('sends only numeric updates, acknowledges successes and retains failures fo
     async acknowledge(id) { queue.find((item) => item.id === id).status = 'sent' },
     async cacheModel() { assert.fail('unexpected cache') },
     async savePointSpacingModel() {},
+    async saveInteractionModel() {},
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
     calls.push({ url, options })
     if (calls.length === 2) throw new Error('offline')
-    return Response.json(url.endsWith('/plotline_get_point_spacing_model') ? pointSpacingModel : model)
+    if (url.endsWith('/plotline_get_point_spacing_model')) return Response.json(pointSpacingModel)
+    if (url.endsWith('/plotline_get_interaction_model')) return Response.json(interactionModel)
+    return Response.json(model)
   }
   try {
     await assert.rejects(syncOnlineLearning(store, config), /offline/)
@@ -69,6 +82,7 @@ test('sends detailed comparison and weight update together before acknowledging'
     async pendingSamples() { return acknowledged ? [] : [item] },
     async acknowledge() { acknowledged = true },
     async savePointSpacingModel() {},
+    async saveInteractionModel() {},
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
@@ -76,6 +90,7 @@ test('sends detailed comparison and weight update together before acknowledging'
       assert.deepEqual(JSON.parse(options.body), { p_id: item.updateId, p_delta: item.delta, p_comparison: comparison })
       return Response.json(model)
     }
+    if (url.endsWith('/plotline_get_interaction_model')) return Response.json(interactionModel)
     return Response.json(pointSpacingModel)
   }
   try { assert.equal((await syncOnlineLearning(store, config)).pending, 0) }
@@ -94,6 +109,7 @@ test('submits only a numeric spacing target and acknowledges it with the shared 
     },
     async cacheModel(receivedModel) { assert.deepEqual(receivedModel, model) },
     async savePointSpacingModel(receivedModel) { assert.deepEqual(receivedModel, pointSpacingModel) },
+    async saveInteractionModel(receivedModel) { assert.deepEqual(receivedModel, interactionModel) },
   }
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, options) => {
@@ -103,6 +119,7 @@ test('submits only a numeric spacing target and acknowledges it with the shared 
     }
     if (url.endsWith('/plotline_get_learning_model')) return Response.json(model)
     if (url.endsWith('/plotline_get_point_spacing_model')) return Response.json(pointSpacingModel)
+    if (url.endsWith('/plotline_get_interaction_model')) return Response.json(interactionModel)
     assert.fail(`unexpected learning endpoint: ${url}`)
   }
   try {
@@ -133,5 +150,71 @@ test('keeps point-spacing updates queued when the point-spacing migration is mis
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => new Response('', { status: 404 })
   try { await assert.rejects(syncOnlineLearning(store, config), /point-spacing-learning\.sql/) }
+  finally { globalThis.fetch = originalFetch }
+})
+
+test('submits bounded interaction updates and acknowledges them with the shared interaction model', async () => {
+  const interactionUpdate = {
+    featureDelta: Array(14).fill(0.05),
+    featureSamplesDelta: 1,
+    spacingTarget: 0.94,
+    curvatureDelta: 0.04,
+    snapTarget: 12.5,
+    healingChoice: 2,
+    statsDelta: { pointsAdded: 1, pointsMoved: 0, pointsDeleted: 0, pointsSnapped: 0, healingApplied: 1, paintSessions: 0, reconstructionEdits: 0 },
+  }
+  const item = { id: 'interaction-sample', updateId: 'interaction-uuid', delta: [], interactionUpdate, status: 'pending' }
+  let acknowledged = false
+  const store = {
+    async pendingSamples() { return acknowledged ? [] : [item] },
+    async acknowledgeInteraction(id, receivedModel) {
+      assert.equal(id, item.id)
+      assert.deepEqual(receivedModel, interactionModel)
+      acknowledged = true
+    },
+    async cacheModel(receivedModel) { assert.deepEqual(receivedModel, model) },
+    async savePointSpacingModel(receivedModel) { assert.deepEqual(receivedModel, pointSpacingModel) },
+    async saveInteractionModel() { assert.fail('unexpected separate interaction cache') },
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('/plotline_submit_interaction_update')) {
+      assert.deepEqual(JSON.parse(options.body), { p_id: item.updateId, p_update: interactionUpdate })
+      return Response.json(interactionModel)
+    }
+    if (url.endsWith('/plotline_get_learning_model')) return Response.json(model)
+    if (url.endsWith('/plotline_get_point_spacing_model')) return Response.json(pointSpacingModel)
+    assert.fail(`unexpected endpoint: ${url}`)
+  }
+  try {
+    const result = await syncOnlineLearning(store, config)
+    assert.equal(result.pending, 0)
+    assert.deepEqual(result.interactionModel, interactionModel)
+  } finally { globalThis.fetch = originalFetch }
+})
+
+test('keeps interaction updates queued when interaction-learning.sql migration is missing', async () => {
+  const item = {
+    id: 'interaction-sample',
+    updateId: 'interaction-uuid',
+    delta: [],
+    interactionUpdate: {
+      featureDelta: Array(14).fill(0),
+      featureSamplesDelta: 0,
+      spacingTarget: null,
+      curvatureDelta: 0,
+      snapTarget: null,
+      healingChoice: 1,
+      statsDelta: { pointsAdded: 0, pointsMoved: 0, pointsDeleted: 0, pointsSnapped: 0, healingApplied: 1, paintSessions: 0, reconstructionEdits: 0 },
+    },
+    status: 'pending',
+  }
+  const store = {
+    async pendingSamples() { return [item] },
+    async acknowledgeInteraction() { assert.fail('failed update must remain queued') },
+  }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('', { status: 404 })
+  try { await assert.rejects(syncOnlineLearning(store, config), /interaction-learning\.sql/) }
   finally { globalThis.fetch = originalFetch }
 })
