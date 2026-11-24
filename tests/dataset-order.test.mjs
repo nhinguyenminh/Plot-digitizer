@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { datasetRange, reorderDatasets, updatePendingTrace } from '../src/lib/dataset-order.ts'
+import { datasetRange, reorderById, reorderDatasets, updatePendingTrace } from '../src/lib/dataset-order.ts'
 
 test('review merge and deletion retain only remaining candidates and correct point baselines', () => {
   const pending = { ids: ['a', 'b', 'c'], previousActiveId: 'old', warnings: [], generated: {
@@ -31,4 +31,12 @@ test('moves a dataset before or after a target without changing the others', () 
   assert.deepEqual(items.map(({ id }) => id), ['a', 'b', 'c', 'd'])
   assert.equal(reorderDatasets(items, 'a', 'a', true), items)
   assert.equal(reorderDatasets(items, 'a', 'missing', true), items)
+})
+
+test('reorders chart tabs by id before or after a target without mutating the source', () => {
+  const tabs = [{ id: 'c1', name: 'Chart 1' }, { id: 'c2', name: 'Chart 2' }, { id: 'c3', name: 'Chart 3' }]
+  assert.deepEqual(reorderById(tabs, 'c3', 'c1', false).map(({ id }) => id), ['c3', 'c1', 'c2'])
+  assert.deepEqual(reorderById(tabs, 'c1', 'c2', true).map(({ id }) => id), ['c2', 'c1', 'c3'])
+  assert.deepEqual(tabs.map(({ id }) => id), ['c1', 'c2', 'c3'])
+  assert.equal(reorderById(tabs, 'c2', 'c2', false), tabs)
 })

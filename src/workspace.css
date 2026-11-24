@@ -26,6 +26,7 @@
   gap: 4px;
   flex: 1;
   min-width: 0;
+  padding: 0 3px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
 }
@@ -39,7 +40,24 @@
   border-bottom: 0;
   border-radius: 9px 9px 0 0;
   background: #11181e;
-  transition: background-color 150ms var(--ease), border-color 150ms var(--ease);
+  transition: background-color 150ms var(--ease), border-color 150ms var(--ease), opacity 150ms var(--ease), box-shadow 120ms var(--ease);
+}
+
+.chart-tab-item[draggable='true'] {
+  cursor: grab;
+}
+
+.chart-tab-item.dragging {
+  opacity: 0.48;
+  cursor: grabbing;
+}
+
+.chart-tab-item.drop-before {
+  box-shadow: -3px 0 0 var(--mint);
+}
+
+.chart-tab-item.drop-after {
+  box-shadow: 3px 0 0 var(--mint);
 }
 
 .chart-tab-item:hover {

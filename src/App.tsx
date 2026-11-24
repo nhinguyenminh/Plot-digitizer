@@ -18,7 +18,7 @@ import { axisName, calibrationFromDrafts, calibrationPointsFromGrid, csvHeader, 
 import { BRUSH_GROUPS, createBrushLearningMasks, createBrushMask, dilateBrushMask, extractBrushGroups } from './lib/painted-region'
 import { proposeBrushedHealing, snapToCurve } from './lib/curve-healing'
 import { mergeDatasets } from './lib/dataset-merge'
-import { datasetRange, reorderDatasets, updatePendingTrace } from './lib/dataset-order'
+import { datasetRange, reorderById, reorderDatasets, updatePendingTrace } from './lib/dataset-order'
 import type { PendingTrace } from './lib/dataset-order'
 import { drawDatasets } from './lib/dataset-render'
 import { rotationGeometry, rulerCorrection } from './lib/deskew'
@@ -270,6 +270,8 @@ export default function App() {
   const [charts, setCharts] = useState<ChartRecord[]>(() => [{ id: crypto.randomUUID(), name: 'Chart 1', state: blankChart() }])
   const [activeChartId, setActiveChartId] = useState(() => charts[0].id)
   const [editingChartName, setEditingChartName] = useState<{ id: string; value: string } | null>(null)
+  const [draggingChartId, setDraggingChartId] = useState<string | null>(null)
+  const [chartDropTarget, setChartDropTarget] = useState<{ id: string; after: boolean } | null>(null)
   const [cloudOpen, setCloudOpen] = useState(false)
   const [cloudResetKey, setCloudResetKey] = useState(0)
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
@@ -280,6 +282,7 @@ export default function App() {
   const exportMenuButton = useRef<HTMLButtonElement>(null)
   const openImageRef = useRef<(file?: File) => void>(() => undefined)
   const processingRun = useRef(0)
+  const draggedChartId = useRef<string | null>(null)
   const draggedDatasetId = useRef<string | null>(null)
   const datasetSelectionAnchor = useRef<string | null>(null)
   const brushTraceIds = useRef<string[]>([])
@@ -605,6 +608,20 @@ export default function App() {
     if (!name) { showNotice('Chart name cannot be empty.', 'error'); return }
     setCharts((current) => current.map((chart) => chart.id === editingChartName.id ? { ...chart, name } : chart))
     setEditingChartName(null)
+  }
+
+  const reorderChartTabs = (draggedId: string, targetId: string, after: boolean) => {
+    if (projectBusy || charts.length < 2 || draggedId === targetId) return
+    const snapshot = currentProject()
+    const reordered = reorderById(snapshot.charts, draggedId, targetId, after)
+    if (reordered !== snapshot.charts) setCharts(reordered)
+  }
+
+  const moveChartTab = (id: string, direction: -1 | 1) => {
+    if (projectBusy || charts.length < 2) return
+    const index = charts.findIndex((chart) => chart.id === id)
+    const target = charts[index + direction]
+    if (target) reorderChartTabs(id, target.id, direction > 0)
   }
 
   const openImage = (file?: File) => {
@@ -2244,12 +2261,76 @@ export default function App() {
       </header>
 
       <nav className="chart-tabs" aria-label="Project charts">
-        <div ref={chartTabList} className="chart-tab-list" role="tablist" aria-label="Charts">
-          {charts.map((chart) => <div key={chart.id} className={`chart-tab-item ${chart.id === activeChartId ? 'active' : ''}`}>
-            {editingChartName?.id === chart.id
-              ? <form onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) saveChartName() }} onSubmit={(event) => { event.preventDefault(); saveChartName() }}><input autoFocus aria-label={`Rename chart ${chart.name}`} value={editingChartName.value} onChange={(event) => setEditingChartName({ id: chart.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingChartName(null) } }} /><button type="submit" aria-label="Confirm chart name"><Check size={13} /></button></form>
-              : <><button role="tab" title={chart.name} aria-selected={chart.id === activeChartId} disabled={projectBusy} onClick={() => switchChart(chart.id)}>{chart.name}</button><button className="chart-tab-action" disabled={projectBusy} title="Rename chart" aria-label={`Rename chart ${chart.name}`} onClick={() => setEditingChartName({ id: chart.id, value: chart.name })}><Pencil size={12} /></button><button className="chart-tab-action" disabled={projectBusy || charts.length < 2} title="Delete chart" aria-label={`Delete chart ${chart.name}`} onClick={() => deleteChart(chart.id)}><Trash2 size={12} /></button></>}
-          </div>)}
+        <div
+          ref={chartTabList}
+          className="chart-tab-list"
+          role="tablist"
+          aria-label="Charts"
+          onDragOver={(event) => {
+            if (!draggedChartId.current || projectBusy || event.target !== event.currentTarget) return
+            const last = charts[charts.length - 1]
+            if (!last || last.id === draggedChartId.current) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'move'
+            setChartDropTarget((current) => current?.id === last.id && current.after ? current : { id: last.id, after: true })
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node)) setChartDropTarget(null)
+          }}
+          onDrop={(event) => {
+            if (!draggedChartId.current || projectBusy || event.target !== event.currentTarget) return
+            const last = charts[charts.length - 1]
+            if (!last || last.id === draggedChartId.current) return
+            event.preventDefault()
+            event.stopPropagation()
+            reorderChartTabs(draggedChartId.current, last.id, true)
+            draggedChartId.current = null; setDraggingChartId(null); setChartDropTarget(null)
+          }}
+        >
+          {charts.map((chart) => {
+            const canDrag = !projectBusy && charts.length > 1 && editingChartName?.id !== chart.id
+            return <div
+              key={chart.id}
+              draggable={canDrag}
+              className={`chart-tab-item ${chart.id === activeChartId ? 'active' : ''} ${draggingChartId === chart.id ? 'dragging' : ''} ${chartDropTarget?.id === chart.id ? chartDropTarget.after ? 'drop-after' : 'drop-before' : ''}`}
+              onDragStart={(event) => {
+                if (!canDrag) { event.preventDefault(); return }
+                draggedChartId.current = chart.id
+                setDraggingChartId(chart.id)
+                event.dataTransfer.effectAllowed = 'move'
+                event.dataTransfer.setData('text/plain', chart.id)
+              }}
+              onDragOver={(event) => {
+                if (!draggedChartId.current || draggedChartId.current === chart.id || projectBusy) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                const rect = event.currentTarget.getBoundingClientRect()
+                const after = event.clientX > rect.left + rect.width / 2
+                setChartDropTarget((current) => current?.id === chart.id && current.after === after ? current : { id: chart.id, after })
+              }}
+              onDragLeave={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+                  setChartDropTarget((current) => current?.id === chart.id ? null : current)
+                }
+              }}
+              onDrop={(event) => {
+                if (!draggedChartId.current || draggedChartId.current === chart.id || projectBusy) return
+                event.preventDefault()
+                event.stopPropagation()
+                const rect = event.currentTarget.getBoundingClientRect()
+                const after = event.clientX > rect.left + rect.width / 2
+                reorderChartTabs(draggedChartId.current, chart.id, after)
+                draggedChartId.current = null; setDraggingChartId(null); setChartDropTarget(null)
+              }}
+              onDragEnd={() => {
+                draggedChartId.current = null; setDraggingChartId(null); setChartDropTarget(null)
+              }}
+            >
+              {editingChartName?.id === chart.id
+                ? <form onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) saveChartName() }} onSubmit={(event) => { event.preventDefault(); saveChartName() }}><input autoFocus aria-label={`Rename chart ${chart.name}`} value={editingChartName.value} onChange={(event) => setEditingChartName({ id: chart.id, value: event.target.value })} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditingChartName(null) } }} /><button type="submit" aria-label="Confirm chart name"><Check size={13} /></button></form>
+                : <><button role="tab" title={charts.length > 1 ? `${chart.name} · Drag to reorder (Alt+←/→)` : chart.name} aria-selected={chart.id === activeChartId} disabled={projectBusy} onClick={() => switchChart(chart.id)} onKeyDown={(event) => { if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) { event.preventDefault(); moveChartTab(chart.id, event.key === 'ArrowLeft' ? -1 : 1) } }}>{chart.name}</button><button className="chart-tab-action" disabled={projectBusy} title="Rename chart" aria-label={`Rename chart ${chart.name}`} onClick={() => setEditingChartName({ id: chart.id, value: chart.name })}><Pencil size={12} /></button><button className="chart-tab-action" disabled={projectBusy || charts.length < 2} title="Delete chart" aria-label={`Delete chart ${chart.name}`} onClick={() => deleteChart(chart.id)}><Trash2 size={12} /></button></>}
+            </div>
+          })}
         </div>
         <button className="chart-add" onClick={addChart} disabled={projectBusy} aria-label="Add chart" title="Add chart">+</button>
       </nav>
