@@ -19,11 +19,14 @@ export interface SmartExtractOptions {
   minCurveLength?: number
   maxGap?: number
   scorePixel?: (x: number, y: number) => number
+  gridLines?: { horizontal: number[]; vertical: number[] }
+  plotRegion?: { x: number; y: number; width: number; height: number }
 }
 
 export interface SmartExtractResult {
   curves: PixelPoint[][]
   junctionCrossingsResolved: number
+  gridLinesFiltered: number
   warnings: string[]
 }
 
@@ -304,22 +307,137 @@ export function smartExtractCurvesFromLayer(
   const minCurveLength = Math.max(6, options.minCurveLength ?? 14)
   const maxGap = Math.max(0, options.maxGap ?? 24)
   const scorePixel = options.scorePixel
+  const plotRegion = options.plotRegion
 
   if (mask && mask.length !== data.length) throw new Error('Selection mask does not match image dimensions.')
 
-  // 1. Build clean binary ink map
+  // 1. Build clean binary ink map (optionally clipped to plotRegion)
+  const regionLeft = plotRegion ? Math.max(0, Math.floor(plotRegion.x)) : 0
+  const regionTop = plotRegion ? Math.max(0, Math.floor(plotRegion.y)) : 0
+  const regionRight = plotRegion ? Math.min(width - 1, Math.ceil(plotRegion.x + plotRegion.width)) : width - 1
+  const regionBottom = plotRegion ? Math.min(height - 1, Math.ceil(plotRegion.y + plotRegion.height)) : height - 1
+
   const ink = new Uint8Array(width * height)
+  const coloredInk = new Uint8Array(width * height)
   let inkCount = 0
-  for (let index = 0; index < ink.length; index++) {
-    const offset = index * 4
-    if (mask && mask[offset + 3] < 128) continue
-    if (isInkPixel(data, offset, mode, curveColor, tolerance)) {
-      ink[index] = 1
-      inkCount++
+  let inkMinX = width, inkMaxX = -1, inkMinY = height, inkMaxY = -1
+  for (let y = regionTop; y <= regionBottom; y++) {
+    for (let x = regionLeft; x <= regionRight; x++) {
+      const index = y * width + x
+      const offset = index * 4
+      if (mask && mask[offset + 3] < 128) continue
+      if (isInkPixel(data, offset, mode, curveColor, tolerance)) {
+        ink[index] = 1
+        inkCount++
+        if (x < inkMinX) inkMinX = x
+        if (x > inkMaxX) inkMaxX = x
+        if (y < inkMinY) inkMinY = y
+        if (y > inkMaxY) inkMaxY = y
+        const maxC = Math.max(data[offset], data[offset + 1], data[offset + 2])
+        const minC = Math.min(data[offset], data[offset + 1], data[offset + 2])
+        if (data[offset + 3] >= 128 && maxC - minC >= 36) coloredInk[index] = 1
+      }
     }
   }
   if (!inkCount) {
-    return { curves: [], junctionCrossingsResolved: 0, warnings: ['No detectable curve ink found.'] }
+    return { curves: [], junctionCrossingsResolved: 0, gridLinesFiltered: 0, warnings: ['No detectable curve ink found.'] }
+  }
+
+  const horizontalGrid = [...(options.gridLines?.horizontal ?? [])].filter(Number.isFinite)
+  const verticalGrid = [...(options.gridLines?.vertical ?? [])].filter(Number.isFinite)
+
+  // 1b. In raw dark-ink mode (unprocessed/original scan), detect and suppress axis/gridlines before thinning
+  if (mode === 'dark') {
+    const boxLeft = plotRegion ? regionLeft : inkMinX
+    const boxRight = plotRegion ? regionRight : inkMaxX
+    const boxTop = plotRegion ? regionTop : inkMinY
+    const boxBottom = plotRegion ? regionBottom : inkMaxY
+    const boxW = Math.max(1, boxRight - boxLeft + 1)
+    const boxH = Math.max(1, boxBottom - boxTop + 1)
+
+    const detectRawGrid = (horizontal: boolean) => {
+      const pStart = horizontal ? boxTop : boxLeft
+      const pEnd = horizontal ? boxBottom : boxRight
+      const qStart = horizontal ? boxLeft : boxTop
+      const qEnd = horizontal ? boxRight : boxBottom
+      const span = horizontal ? boxW : boxH
+      const maskLine = new Uint8Array(horizontal ? height : width)
+      const neutralByP = new Uint32Array(horizontal ? height : width)
+      const detected: number[] = []
+      let runStart = -1, weighted = 0, total = 0
+
+      for (let p = pStart; p <= pEnd + 1; p++) {
+        let score = 0, neutralCount = 0, firstNeutral = -1, lastNeutral = -1, runs = 0, curRun = 0, maxRun = 0
+        if (p <= pEnd) {
+          for (let q = qStart; q <= qEnd; q++) {
+            const idx = horizontal ? p * width + q : q * width + p
+            if (ink[idx]) {
+              if (coloredInk[idx]) {
+                score += 0.15
+                if (curRun > 0) { maxRun = Math.max(maxRun, curRun); curRun = 0 }
+              } else {
+                score += 1
+                neutralCount++
+                if (firstNeutral < 0) firstNeutral = q
+                lastNeutral = q
+                if (curRun === 0) runs++
+                curRun++
+              }
+            } else if (curRun > 0) {
+              maxRun = Math.max(maxRun, curRun)
+              curRun = 0
+            }
+          }
+          if (curRun > 0) maxRun = Math.max(maxRun, curRun)
+          neutralByP[p] = neutralCount
+        }
+        const solid = score >= span * 0.35
+        const dashed = !solid && runs >= 4 && firstNeutral >= 0
+          && (lastNeutral - firstNeutral + 1) >= span * 0.55
+          && neutralCount >= span * 0.14
+          && maxRun <= span * 0.25
+        if (solid || dashed) {
+          if (runStart < 0) runStart = p
+          const weight = solid ? score : neutralCount
+          weighted += p * weight; total += weight
+        } else if (runStart >= 0) {
+          const center = Math.round(weighted / total)
+          detected.push(center)
+          for (let pos = runStart; pos <= p - 1; pos++) maskLine[pos] = 1
+          if (runStart > pStart && neutralByP[runStart - 1] >= span * 0.12) maskLine[runStart - 1] = 1
+          if (p <= pEnd && neutralByP[p] >= span * 0.12) maskLine[p] = 1
+          runStart = -1; weighted = 0; total = 0
+        }
+      }
+      const existing = horizontal ? horizontalGrid : verticalGrid
+      for (const line of existing) {
+        const pos = Math.round(line)
+        if (pos >= 0 && pos < maskLine.length) {
+          maskLine[pos] = 1
+          if (pos > 0 && neutralByP[pos - 1] >= span * 0.12) maskLine[pos - 1] = 1
+          if (pos + 1 < maskLine.length && neutralByP[pos + 1] >= span * 0.12) maskLine[pos + 1] = 1
+        }
+      }
+      for (const pos of detected) {
+        if (!existing.some((line) => Math.abs(line - pos) <= 2)) existing.push(pos)
+      }
+      return maskLine
+    }
+
+    const hRawMask = detectRawGrid(true)
+    const vRawMask = detectRawGrid(false)
+    for (let y = regionTop; y <= regionBottom; y++) {
+      for (let x = regionLeft; x <= regionRight; x++) {
+        const idx = y * width + x
+        if (ink[idx] && (hRawMask[y] || vRawMask[x]) && !coloredInk[idx]) {
+          ink[idx] = 0
+          inkCount--
+        }
+      }
+    }
+    if (!inkCount) {
+      return { curves: [], junctionCrossingsResolved: 0, gridLinesFiltered: horizontalGrid.length + verticalGrid.length, warnings: ['No detectable curve ink found after removing gridlines.'] }
+    }
   }
 
   // 2. Remove tiny isolated noise blobs before thinning
@@ -581,8 +699,99 @@ export function smartExtractCurvesFromLayer(
     if (!visitedBranches.has(branch.id)) stitched.push(followChain(branch.id, 'forward'))
   }
 
-  // 9. Bridge short clean gaps between compatible facing endpoints
-  const curvesRaw = stitched.filter((curve) => pathArcLength(curve) >= Math.max(4, minCurveLength * 0.45))
+  // 8b. Helper to identify gridline, axis, or plot-frame candidates
+  const plotW = plotRegion ? Math.max(1, plotRegion.width) : Math.max(1, inkMaxX - inkMinX + 1)
+  const plotH = plotRegion ? Math.max(1, plotRegion.height) : Math.max(1, inkMaxY - inkMinY + 1)
+  let gridLinesFiltered = 0
+
+  const filterGridCandidates = (candidates: PixelPoint[][], strictOnly: boolean) => {
+    const metaList = candidates.map((raw) => {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+      let sumX = 0, sumY = 0
+      for (const pt of raw) {
+        if (pt.x < minX) minX = pt.x
+        if (pt.x > maxX) maxX = pt.x
+        if (pt.y < minY) minY = pt.y
+        if (pt.y > maxY) maxY = pt.y
+        sumX += pt.x
+        sumY += pt.y
+      }
+      const xSpan = maxX - minX
+      const ySpan = maxY - minY
+      const midX = raw.length ? sumX / raw.length : 0
+      const midY = raw.length ? sumY / raw.length : 0
+      const strictHorizontal = xSpan >= 18 && ySpan <= Math.max(2.5, xSpan * 0.015)
+      const strictVertical = ySpan >= 18 && xSpan <= Math.max(2.5, ySpan * 0.015)
+      return { raw, minX, maxX, minY, maxY, xSpan, ySpan, midX, midY, strictHorizontal, strictVertical }
+    })
+
+    const distinctParallelCount = (values: number[]) => {
+      const sorted = [...values].sort((a, b) => a - b)
+      let groups = 0
+      let last = -Infinity
+      for (const value of sorted) {
+        if (value - last >= 4) { groups++; last = value }
+      }
+      return groups
+    }
+    const parallelHorizontalCount = distinctParallelCount(
+      metaList.filter((m) => m.strictHorizontal && m.xSpan >= plotW * 0.30).map((m) => m.midY),
+    )
+    const parallelVerticalCount = distinctParallelCount(
+      metaList.filter((m) => m.strictVertical && m.ySpan >= plotH * 0.30).map((m) => m.midX),
+    )
+
+    const kept: PixelPoint[][] = []
+    for (const meta of metaList) {
+      let isGrid = false
+      // 1) Hugs a known/detected horizontal or vertical gridline
+      if (horizontalGrid.length && meta.ySpan <= 6 && meta.xSpan >= 8) {
+        for (const lineY of horizontalGrid) {
+          let onLine = 0
+          for (const pt of meta.raw) if (Math.abs(pt.y - lineY) <= 4) onLine++
+          if (onLine / meta.raw.length >= 0.82) { isGrid = true; break }
+        }
+      }
+      if (!isGrid && verticalGrid.length && meta.xSpan <= 6 && meta.ySpan >= 8) {
+        for (const lineX of verticalGrid) {
+          let onLine = 0
+          for (const pt of meta.raw) if (Math.abs(pt.x - lineX) <= 4) onLine++
+          if (onLine / meta.raw.length >= 0.82) { isGrid = true; break }
+        }
+      }
+      // 2) Undetected axis-aligned gridline / plot border / parallel grid family
+      if (!isGrid && !strictOnly && meta.strictHorizontal) {
+        if (meta.xSpan >= plotW * 0.65 || (parallelHorizontalCount >= 2 && meta.xSpan >= plotW * 0.30)) {
+          isGrid = true
+        } else {
+          const collinearSpan = metaList
+            .filter((other) => other.strictHorizontal && Math.abs(other.midY - meta.midY) <= 3.5)
+            .reduce((sum, other) => sum + other.xSpan, 0)
+          if (collinearSpan >= plotW * 0.45) isGrid = true
+        }
+      }
+      if (!isGrid && !strictOnly && meta.strictVertical) {
+        if (meta.ySpan >= plotH * 0.65 || (parallelVerticalCount >= 2 && meta.ySpan >= plotH * 0.30)) {
+          isGrid = true
+        } else {
+          const collinearSpan = metaList
+            .filter((other) => other.strictVertical && Math.abs(other.midX - meta.midX) <= 3.5)
+            .reduce((sum, other) => sum + other.ySpan, 0)
+          if (collinearSpan >= plotH * 0.45) isGrid = true
+        }
+      }
+      if (isGrid) gridLinesFiltered++
+      else kept.push(meta.raw)
+    }
+    return kept
+  }
+
+  // 9. Remove known-gridline remnants first, then bridge short clean gaps between compatible facing endpoints
+  const curvesRaw = filterGridCandidates(
+    stitched.filter((curve) => pathArcLength(curve) >= Math.max(4, minCurveLength * 0.45)),
+    true,
+  )
+  const sameEndpoint = (i1: number, e1: boolean, i2: number, e2: boolean) => i1 === i2 && e1 === e2
   if (maxGap > 0) {
     while (curvesRaw.length > 1) {
       type GapCandidate = { a: number; aEnd: boolean; b: number; bEnd: boolean; score: number }
@@ -603,22 +812,30 @@ export function smartExtractCurvesFromLayer(
               // Outgoing tangent at pA points AWAY from the curve end => (-tA) points into the gap toward pB!
               const forward = (-tA.x * dx - tA.y * dy) / dist
               const backward = (-tB.x * (-dx) - tB.y * (-dy)) / dist
-              if (forward < 0.84 || backward < 0.84) continue
+              const tangentAlign = -(tA.x * tB.x + tA.y * tB.y)
+              const crossesGrid = dist <= 12 && (
+                horizontalGrid.some((lineY) => lineY >= Math.min(pA.y, pB.y) - 3 && lineY <= Math.max(pA.y, pB.y) + 3)
+                || verticalGrid.some((lineX) => lineX >= Math.min(pA.x, pB.x) - 3 && lineX <= Math.max(pA.x, pB.x) + 3)
+              )
+              const minProgress = dist <= 4 ? 0.25 : crossesGrid ? 0.45 : dist <= 8 ? 0.55 : 0.80
+              if (forward < minProgress || backward < minProgress || tangentAlign < 0.78) continue
               const errA = Math.abs(dx * (-tA.y) - dy * (-tA.x))
               const errB = Math.abs((-dx) * (-tB.y) - (-dy) * (-tB.x))
-              if (errA > 3 + dist * 0.1 || errB > 3 + dist * 0.1) continue
-              gapCandidates.push({ a: i, aEnd, b: j, bEnd, score: dist * 0.35 + errA + errB + (2 - forward - backward) * 10 })
+              const maxErr = (crossesGrid ? 6 : dist <= 8 ? 4 : 3) + dist * 0.12
+              if (errA > maxErr || errB > maxErr) continue
+              gapCandidates.push({ a: i, aEnd, b: j, bEnd, score: dist * 0.35 + errA + errB + (2 - forward - backward) * 10 + (1 - tangentAlign) * 8 })
             }
           }
         }
       }
       gapCandidates.sort((x, y) => x.score - y.score)
-      const best = gapCandidates[0]
+      const best = gapCandidates.find((candidate) => !gapCandidates.some((other) => other !== candidate
+        && (sameEndpoint(other.a, other.aEnd, candidate.a, candidate.aEnd)
+          || sameEndpoint(other.b, other.bEnd, candidate.a, candidate.aEnd)
+          || sameEndpoint(other.a, other.aEnd, candidate.b, candidate.bEnd)
+          || sameEndpoint(other.b, other.bEnd, candidate.b, candidate.bEnd))
+        && other.score < candidate.score + 2))
       if (!best) break
-      const ambiguous = gapCandidates.slice(1).some((other) =>
-        (other.a === best.a || other.b === best.a || other.a === best.b || other.b === best.b)
-        && other.score < best.score + 2)
-      if (ambiguous) break
       const first = best.aEnd ? curvesRaw[best.a] : [...curvesRaw[best.a]].reverse()
       const second = best.bEnd ? [...curvesRaw[best.b]].reverse() : curvesRaw[best.b]
       curvesRaw[best.a] = [...first, ...second]
@@ -626,9 +843,12 @@ export function smartExtractCurvesFromLayer(
     }
   }
 
+  // 9b. Final gridline/border filter after gap bridging
+  const filteredCurves = filterGridCandidates(curvesRaw, false)
+
   // 10. Filter short noise, orient consistently, curvature-adaptively sample, and sub-pixel refine
   const finalCurves: PixelPoint[][] = []
-  for (const raw of curvesRaw) {
+  for (const raw of filteredCurves) {
     if (pathArcLength(raw) < minCurveLength) continue
     const first = raw[0], last = raw[raw.length - 1]
     const dx = last.x - first.x, dy = last.y - first.y
@@ -655,5 +875,5 @@ export function smartExtractCurvesFromLayer(
 
   const warnings: string[] = []
   if (!finalCurves.length) warnings.push('No curves long enough to extract were found.')
-  return { curves: finalCurves, junctionCrossingsResolved, warnings }
+  return { curves: finalCurves, junctionCrossingsResolved, gridLinesFiltered, warnings }
 }

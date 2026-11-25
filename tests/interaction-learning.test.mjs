@@ -152,3 +152,39 @@ test('createInteractionUpdatePayload creates bounded sync deltas and validates p
   assert.equal(payload.statsDelta.healingApplied, 1)
   assert.equal(isValidInteractionUpdatePayload({ ...payload, featureDelta: [99] }), false)
 })
+
+test('predictEnhancedLearningEdits never re-adds neutral gridlines onto the curve layer', () => {
+  const width = 100, height = 80
+  const source = new Uint8ClampedArray(width * height * 4).fill(255)
+  const automatic = new Uint8ClampedArray(width * height * 4)
+  // Neutral black horizontal gridline at y=40 and vertical gridline at x=50 (not in automatic)
+  for (let x = 10; x < 90; x++) {
+    const offset = (40 * width + x) * 4
+    source[offset] = source[offset + 1] = source[offset + 2] = 20
+  }
+  for (let y = 10; y < 70; y++) {
+    const offset = (y * width + 50) * 4
+    source[offset] = source[offset + 1] = source[offset + 2] = 20
+  }
+  // Colored curve pixel crossing the grid at (50, 40)
+  const crossOffset = (40 * width + 50) * 4
+  source[crossOffset] = 10; source[crossOffset + 1] = 80; source[crossOffset + 2] = 240
+  // Existing automatic curve elsewhere so safety cap allows additions
+  for (let x = 10; x < 90; x++) automatic[(15 * width + x) * 4 + 3] = 255
+
+  // Aggressive model that predicts high probability for any dark source ink
+  const aggressiveModel = {
+    ...initialInteractionModel(),
+    featureSamples: 5,
+    featureWeights: [-1, 6, 4, 2, 2, 0, 0, 0, 0, 0, 0, 2, 0, 0],
+  }
+  const prediction = predictEnhancedLearningEdits(initialLearningModel(), aggressiveModel, {
+    width, height, source, automatic,
+    gridLines: { horizontal: [40], vertical: [50] },
+  })
+  // Neutral gridline pixels must NEVER be added back
+  assert.equal(prediction.add[40 * width + 25], 0)
+  assert.equal(prediction.add[25 * width + 50], 0)
+  // Colored curve pixel crossing the grid MAY still be added
+  assert.equal(prediction.add[40 * width + 50], 1)
+})

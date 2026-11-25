@@ -4,12 +4,19 @@ export interface LearningModel {
   samples: number
 }
 
+export interface LearningGridLines {
+  horizontal: number[]
+  vertical: number[]
+  tolerance?: number
+}
+
 export interface LearningPixels {
   width: number
   height: number
   source: Uint8ClampedArray
   automatic: Uint8ClampedArray
   region?: { x: number; y: number; width: number; height: number }
+  gridLines?: LearningGridLines
 }
 
 export interface CurveComparison {
@@ -98,10 +105,37 @@ export function trainLearningModel(model: LearningModel, pixels: LearningPixels,
   return trainLearningComparison(model, compareLearningPixels(pixels, corrected))
 }
 
+function isColoredSourceInk(data: Uint8ClampedArray, index: number) {
+  const offset = index * 4
+  if (data[offset + 3] < 128) return false
+  const maxChannel = Math.max(data[offset], data[offset + 1], data[offset + 2])
+  const minChannel = Math.min(data[offset], data[offset + 1], data[offset + 2])
+  return maxChannel - minChannel >= 32
+}
+
+export function buildLearningGridMasks(width: number, height: number, gridLines?: LearningGridLines) {
+  if (!gridLines || (!gridLines.horizontal.length && !gridLines.vertical.length)) return null
+  const tolerance = Math.max(1, Math.round(gridLines.tolerance ?? 2))
+  const horizontal = new Uint8Array(height)
+  const vertical = new Uint8Array(width)
+  for (const line of gridLines.horizontal) {
+    if (!Number.isFinite(line)) continue
+    const center = Math.round(line)
+    for (let y = Math.max(0, center - tolerance); y <= Math.min(height - 1, center + tolerance); y++) horizontal[y] = 1
+  }
+  for (const line of gridLines.vertical) {
+    if (!Number.isFinite(line)) continue
+    const center = Math.round(line)
+    for (let x = Math.max(0, center - tolerance); x <= Math.min(width - 1, center + tolerance); x++) vertical[x] = 1
+  }
+  return { horizontal, vertical }
+}
+
 export function predictLearningEdits(model: LearningModel, pixels: LearningPixels) {
   const size = pixels.width * pixels.height
   if (pixels.source.length !== size * 4 || pixels.automatic.length !== size * 4 || model.weights.length !== initialWeights.length) throw new Error('Invalid learning model or image.')
   const add = new Uint8Array(size), erase = new Uint8Array(size)
+  const gridMasks = buildLearningGridMasks(pixels.width, pixels.height, pixels.gridLines)
   let changed = 0, automaticCount = 0
   for (let index = 0; index < size; index++) {
     const automatic = pixels.automatic[index * 4 + 3] >= 64
@@ -117,7 +151,10 @@ export function predictLearningEdits(model: LearningModel, pixels: LearningPixel
     const input = features(pixels, index)
     const chance = probability(model.weights, input)
     if (automatic && chance < 0.2) { erase[index] = 1; changed++ }
-    if (!automatic && chance > 0.8) { add[index] = 1; changed++ }
+    if (!automatic && chance > 0.8) {
+      const onNeutralGrid = Boolean(gridMasks && (gridMasks.horizontal[y] || gridMasks.vertical[x]) && !isColoredSourceInk(pixels.source, index))
+      if (!onNeutralGrid) { add[index] = 1; changed++ }
+    }
   }
   if (changed > Math.min(10000, Math.max(200, automaticCount * 0.3))) throw new Error('Learned changes were too extensive; the unmodified automatic result was kept.')
   return { add, erase, changed }

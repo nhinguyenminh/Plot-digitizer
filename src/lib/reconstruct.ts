@@ -68,23 +68,76 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   const findLines = (horizontal: boolean, manual: number[], axis: number | null) => {
     const length = horizontal ? h : w
     const span = horizontal ? w : h
+    const rowNeutral = new Uint32Array(length)
+    const rowTinted = new Uint8Array(length)
     const candidates: { position: number; start: number; end: number; strength: number }[] = []
+    const tintedCandidates: { position: number; start: number; end: number; strength: number }[] = []
     let start = -1; let weighted = 0; let total = 0
+    let tintedStart = -1; let tintedWeighted = 0; let tintedTotal = 0
     for (let p = 0; p <= length; p++) {
       let score = 0
+      let neutralCount = 0
+      let rawCount = 0
+      let firstNeutral = -1
+      let lastNeutral = -1
+      let neutralRuns = 0
+      let currentRun = 0
+      let maxNeutralRun = 0
       if (p < length) {
         for (let q = 0; q < span; q++) {
           const idx = horizontal ? p * w + q : q * w + p
-          if (ink[idx]) score += coloredCurve[idx] ? 0.15 : 1
+          if (ink[idx]) {
+            rawCount++
+            if (coloredCurve[idx]) {
+              score += 0.15
+              if (currentRun > 0) { maxNeutralRun = Math.max(maxNeutralRun, currentRun); currentRun = 0 }
+            } else {
+              score += 1
+              neutralCount++
+              if (firstNeutral < 0) firstNeutral = q
+              lastNeutral = q
+              if (currentRun === 0) neutralRuns++
+              currentRun++
+            }
+          } else if (currentRun > 0) {
+            maxNeutralRun = Math.max(maxNeutralRun, currentRun)
+            currentRun = 0
+          }
         }
+        if (currentRun > 0) maxNeutralRun = Math.max(maxNeutralRun, currentRun)
+        rowNeutral[p] = neutralCount
       }
-      if (score >= span * 0.35) {
+      const isSolidLine = score >= span * 0.35
+      const isDashedLine = !isSolidLine
+        && neutralRuns >= 4
+        && firstNeutral >= 0
+        && (lastNeutral - firstNeutral + 1) >= span * 0.55
+        && neutralCount >= span * 0.14
+        && maxNeutralRun <= span * 0.25
+      if (isSolidLine || isDashedLine) {
         if (start < 0) start = p
-        weighted += p * score; total += score
+        const weight = isSolidLine ? score : neutralCount
+        weighted += p * weight; total += weight
       } else if (start >= 0) {
         candidates.push({ position: Math.round(weighted / total), start, end: p - 1, strength: total })
         start = -1; weighted = 0; total = 0
       }
+
+      const isTintedFullLine = !isSolidLine && !isDashedLine && rawCount >= span * 0.65
+      if (isTintedFullLine) {
+        if (tintedStart < 0) tintedStart = p
+        tintedWeighted += p * rawCount; tintedTotal += rawCount
+      } else if (tintedStart >= 0) {
+        tintedCandidates.push({ position: Math.round(tintedWeighted / tintedTotal), start: tintedStart, end: p - 1, strength: tintedTotal })
+        tintedStart = -1; tintedWeighted = 0; tintedTotal = 0
+      }
+    }
+    if (tintedCandidates.length >= 2) {
+      for (const candidate of tintedCandidates) {
+        candidates.push(candidate)
+        for (let position = candidate.start; position <= candidate.end; position++) rowTinted[position] = 1
+      }
+      candidates.sort((a, b) => a.position - b.position)
     }
     const min = horizontal ? top : left
     const max = horizontal ? bottom : right
@@ -94,6 +147,8 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     const mask = new Uint8Array(length)
     for (const candidate of candidates) {
       for (let position = candidate.start; position <= candidate.end; position++) mask[position] = 1
+      if (candidate.start > 0 && rowNeutral[candidate.start - 1] >= span * 0.12) mask[candidate.start - 1] = 1
+      if (candidate.end + 1 < length && rowNeutral[candidate.end + 1] >= span * 0.12) mask[candidate.end + 1] = 1
     }
     for (const line of valid) mask[line - min] = 1
     if (axis !== null) mask[Math.round(axis) - min] = 1
@@ -120,6 +175,14 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       lines.push(axis)
       lines.sort((a, b) => a - b)
     }
+    for (const line of lines) {
+      const local = Math.round(line) - min
+      if (local >= 0 && local < length) {
+        mask[local] = 1
+        if (local > 0 && rowNeutral[local - 1] >= span * 0.12) mask[local - 1] = 1
+        if (local + 1 < length && rowNeutral[local + 1] >= span * 0.12) mask[local + 1] = 1
+      }
+    }
     let inferredAxis = horizontal ? lines[lines.length - 1] : lines[0]
     if (axis === null && lines.length >= 3 && candidates.length >= 3) {
       const strengthAt = (linePos: number) => candidates.find((candidate) => Math.abs(candidate.position + min - linePos) <= 3)?.strength ?? 0
@@ -130,6 +193,7 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     return {
       lines,
       mask,
+      tintedMask: rowTinted,
       inferredAxis,
     }
   }
@@ -139,10 +203,35 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
   const vertical = verticalResult.lines
   const hMask = horizontalResult.mask
   const vMask = verticalResult.mask
-  // Clear neutral grid pixels while keeping colored curve pixels intact right across grid intersections.
+  const hTinted = horizontalResult.tintedMask
+  const vTinted = verticalResult.tintedMask
+  const sampleTintedLineColor = (horizontalLine: boolean, p: number): [number, number, number] | null => {
+    const span = horizontalLine ? w : h
+    let sr = 0, sg = 0, sb = 0, count = 0
+    for (let q = 0; q < span; q++) {
+      const idx = horizontalLine ? p * w + q : q * w + p
+      if (!ink[idx]) continue
+      const source = ((top + (horizontalLine ? p : q)) * width + left + (horizontalLine ? q : p)) * 4
+      sr += data[source]; sg += data[source + 1]; sb += data[source + 2]; count++
+    }
+    return count ? [sr / count, sg / count, sb / count] : null
+  }
+  const hTintedColor = new Map<number, [number, number, number]>()
+  const vTintedColor = new Map<number, [number, number, number]>()
+  for (let y = 0; y < h; y++) if (hTinted[y]) { const rgb = sampleTintedLineColor(true, y); if (rgb) hTintedColor.set(y, rgb) }
+  for (let x = 0; x < w; x++) if (vTinted[x]) { const rgb = sampleTintedLineColor(false, x); if (rgb) vTintedColor.set(x, rgb) }
+  // Clear neutral grid pixels (and matching tinted grid pixels) while keeping contrasting colored curves intact.
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const idx = y * w + x
-    if ((hMask[y] || vMask[x]) && !coloredCurve[idx]) ink[idx] = 0
+    if (!ink[idx]) continue
+    if ((hMask[y] || vMask[x]) && !coloredCurve[idx]) { ink[idx] = 0; continue }
+    const tintedRgb = hTintedColor.get(y) ?? vTintedColor.get(x)
+    if (tintedRgb) {
+      const source = ((top + y) * width + left + x) * 4
+      if (Math.hypot(data[source] - tintedRgb[0], data[source + 1] - tintedRgb[1], data[source + 2] - tintedRgb[2]) <= 45) {
+        ink[idx] = 0
+      }
+    }
   }
 
   const visited = new Uint8Array(w * h)
@@ -237,12 +326,23 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     }
     componentCount++
   }
+  const strictAttachedGridResidue = (path: PixelPoint[]) => {
+    let minX = Infinity; let maxX = -Infinity; let minY = Infinity; let maxY = -Infinity
+    for (const point of path) {
+      minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x)
+      minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y)
+    }
+    const xSpan = maxX - minX; const ySpan = maxY - minY
+    return (xSpan >= 20 && ySpan <= 1 && horizontal.some((line) => line >= maxY - 3 && line <= minY + 3))
+      || (ySpan >= 20 && xSpan <= 1 && vertical.some((line) => line >= maxX - 3 && line <= minX + 3))
+  }
   const componentOf = (path: PixelPoint[]) => component[(path[0].y - top) * w + path[0].x - left]
   const curveComponents = new Set(curves.filter((path) => !gridResidue(path)).map(componentOf))
   const residuePixels = new Set<number>()
   for (let index = curves.length - 1; index >= 0; index--) {
     const path = curves[index]
-    if (!gridResidue(path) || curveComponents.has(componentOf(path))) continue
+    if (!gridResidue(path)) continue
+    if (curveComponents.has(componentOf(path)) && !strictAttachedGridResidue(path)) continue
     for (const point of path) {
       const pixel = (point.y - top) * w + point.x - left
       if (neighbors(pixel).length <= 2) residuePixels.add(pixel)

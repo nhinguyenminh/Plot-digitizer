@@ -1,5 +1,5 @@
 import type { PixelPoint } from './digitizer'
-import { predictLearningEdits } from './learning.ts'
+import { buildLearningGridMasks, predictLearningEdits } from './learning.ts'
 import type { LearningModel, LearningPixels } from './learning.ts'
 
 export interface InteractionStats {
@@ -392,6 +392,34 @@ export function learnFromPointAdded(
         examples.push({ features: extractRichFeatures(pixels, index), label: 0, weight: 0.45 })
       }
     }
+    // Also sample neutral gridline pixels away from curve points as negative contrast so AI never confuses gridlines with curves.
+    if (pixels.gridLines) {
+      let gridNegatives = 0
+      for (const lineY of pixels.gridLines.horizontal) {
+        if (gridNegatives >= 4) break
+        const gy = Math.round(lineY)
+        if (gy < 0 || gy >= pixels.height) continue
+        const gx = clamp(Math.round(point.x + (gridNegatives % 2 === 0 ? 18 : -18)), 0, pixels.width - 1)
+        const index = gy * pixels.width + gx
+        if (Math.hypot(point.x - gx, point.y - gy) < 6 || pointsAfter.some((other) => Math.hypot(other.x - gx, other.y - gy) < 6)) continue
+        if (isSourceInk(pixels.source, index) && pixels.automatic[index * 4 + 3] < 32 && sourceChroma(pixels.source, index) < 32 / 255) {
+          examples.push({ features: extractRichFeatures(pixels, index), label: 0, weight: 0.85 })
+          gridNegatives++
+        }
+      }
+      for (const lineX of pixels.gridLines.vertical) {
+        if (gridNegatives >= 8) break
+        const gx = Math.round(lineX)
+        if (gx < 0 || gx >= pixels.width) continue
+        const gy = clamp(Math.round(point.y + (gridNegatives % 2 === 0 ? 18 : -18)), 0, pixels.height - 1)
+        const index = gy * pixels.width + gx
+        if (Math.hypot(point.x - gx, point.y - gy) < 6 || pointsAfter.some((other) => Math.hypot(other.x - gx, other.y - gy) < 6)) continue
+        if (isSourceInk(pixels.source, index) && pixels.automatic[index * 4 + 3] < 32 && sourceChroma(pixels.source, index) < 32 / 255) {
+          examples.push({ features: extractRichFeatures(pixels, index), label: 0, weight: 0.85 })
+          gridNegatives++
+        }
+      }
+    }
     next = trainRichExamples(next, examples, 16, 0.35)
   }
 
@@ -638,6 +666,7 @@ export function predictEnhancedLearningEdits(
     : 1
   const add = new Uint8Array(size)
   const erase = new Uint8Array(size)
+  const gridMasks = buildLearningGridMasks(pixels.width, pixels.height, pixels.gridLines)
   let changed = 0
   let automaticCount = 0
 
@@ -662,7 +691,11 @@ export function predictEnhancedLearningEdits(
       : richChance
 
     if (automatic && chance < 0.22) { erase[index] = 1; changed++ }
-    if (!automatic && chance > 0.78) { add[index] = 1; changed++ }
+    if (!automatic && chance > 0.78) {
+      // Never allow learned pixel additions to re-introduce neutral gridlines onto the curve layer.
+      const onNeutralGrid = Boolean(gridMasks && (gridMasks.horizontal[y] || gridMasks.vertical[x]) && sourceChroma(pixels.source, index) < 32 / 255)
+      if (!onNeutralGrid) { add[index] = 1; changed++ }
+    }
   }
 
   if (changed > Math.max(400, automaticCount * 0.65)) {

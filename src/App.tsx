@@ -1,13 +1,15 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, ArrowDownToLine, Axis3D, Check, ChevronDown, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
-  Eye, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
+  Eye, FilePlus2, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
   Magnet, MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
   Target, Trash2, Undo2, Redo2, Upload,
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
 import CloudProjects from './components/CloudProjects'
+import DeleteProjectDialog from './components/DeleteProjectDialog'
+import type { CloudProjectRow } from './lib/cloud-projects'
 import type { RotationPreview } from './components/DeskewPanel'
 import { detectPlotAxes, detectPlotGrid } from './lib/image-processing'
 import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-processing'
@@ -274,9 +276,17 @@ export default function App() {
   const [chartDropTarget, setChartDropTarget] = useState<{ id: string; after: boolean } | null>(null)
   const [cloudOpen, setCloudOpen] = useState(false)
   const [cloudResetKey, setCloudResetKey] = useState(0)
+  const [activeCloudProject, setActiveCloudProject] = useState<CloudProjectRow | null>(null)
+  const [deleteProjectOpen, setDeleteProjectOpen] = useState(false)
+  const [deletingProject, setDeletingProject] = useState(false)
+  const [deleteProjectError, setDeleteProjectError] = useState('')
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
+  const deleteActiveCloudRef = useRef<((target: CloudProjectRow) => Promise<void>) | null>(null)
+  const registerDeleteActive = useCallback((fn: ((target: CloudProjectRow) => Promise<void>) | null) => {
+    deleteActiveCloudRef.current = fn
+  }, [])
   const chartTabList = useRef<HTMLDivElement>(null)
   const exportMenu = useRef<HTMLDivElement>(null)
   const exportMenuButton = useRef<HTMLButtonElement>(null)
@@ -291,7 +301,7 @@ export default function App() {
   const pointTrainingBaselines = useRef<Record<string, PixelPoint[]>>({})
   const learningStateRef = useRef<LearningState | null>(null)
   const interactionModelRef = useRef<InteractionModel>(initialInteractionModel())
-  const interactionPixelsCache = useRef<{ key: string; pixels: { width: number; height: number; source: Uint8ClampedArray; automatic: Uint8ClampedArray } } | null>(null)
+  const interactionPixelsCache = useRef<{ key: string; pixels: { width: number; height: number; source: Uint8ClampedArray; automatic: Uint8ClampedArray; gridLines: { horizontal: number[]; vertical: number[] } } } | null>(null)
   const learningWorkRef = useRef(false)
   const syncRef = useRef<Promise<void> | null>(null)
   const latestProject = useRef<ProjectSnapshot | null>(null)
@@ -403,7 +413,7 @@ export default function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if (pendingTrace || cloudOpen) return
+      if (pendingTrace || cloudOpen || deleteProjectOpen) return
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.metaKey || event.ctrlKey || event.altKey) return
       if (event.key === 'Escape') setMode('select')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'p') setMode('point')
@@ -413,7 +423,7 @@ export default function App() {
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking, cloudOpen])
+  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking, cloudOpen, deleteProjectOpen])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
   const learnedSampleStep = effectiveSampleStep(sampleStep, pointSpacingModel.factor, interactionModel)
@@ -486,10 +496,10 @@ export default function App() {
     }
   }
 
-  const getInteractionPixels = async (): Promise<{ width: number; height: number; source: Uint8ClampedArray; automatic: Uint8ClampedArray } | undefined> => {
+  const getInteractionPixels = async (): Promise<{ width: number; height: number; source: Uint8ClampedArray; automatic: Uint8ClampedArray; gridLines: { horizontal: number[]; vertical: number[] } } | undefined> => {
     if (!sourceImageUrl || !reconstruction || needsProcess) return undefined
     if (reconstruction.width * reconstruction.height > 4_000_000) return undefined
-    const key = `${sourceImageUrl}|${reconstruction.width}x${reconstruction.height}|${reconstruction.curves.length}|${reconstructionWidths.curve}`
+    const key = `${sourceImageUrl}|${reconstruction.width}x${reconstruction.height}|${reconstruction.curves.length}|${reconstruction.horizontal.length}x${reconstruction.vertical.length}|${reconstructionWidths.curve}`
     if (interactionPixelsCache.current?.key === key) return interactionPixelsCache.current.pixels
     try {
       const source = new Image()
@@ -509,6 +519,7 @@ export default function App() {
         height: reconstruction.height,
         source: sourceContext.getImageData(0, 0, reconstruction.width, reconstruction.height).data,
         automatic: autoContext.getImageData(0, 0, reconstruction.width, reconstruction.height).data,
+        gridLines: { horizontal: reconstruction.horizontal, vertical: reconstruction.vertical },
       }
       interactionPixelsCache.current = { key, pixels }
       return pixels
@@ -545,7 +556,7 @@ export default function App() {
     return () => { window.clearInterval(timer); window.removeEventListener('online', synchronizeLearning) }
   }, [learningState?.enabled, onlineConfiguration.config, pendingUpdates])
 
-  const projectBusy = Boolean(pendingTrace || rotationPreview || preprocessing || loading || gridDetecting || exporting || learningLoading || learningWorking)
+  const projectBusy = Boolean(pendingTrace || rotationPreview || preprocessing || loading || gridDetecting || exporting || deletingProject || learningLoading || learningWorking)
   const changeHistory = (direction: 'undo' | 'redo') => {
     if (projectBusy || !history.current) return
     const snapshot = direction === 'undo' ? history.current.undo() : history.current.redo()
@@ -558,7 +569,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target
-      if (cloudOpen || !(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
+      if (cloudOpen || deleteProjectOpen || !(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
         || (target instanceof HTMLElement && target.isContentEditable)) return
       const key = event.key.toLowerCase()
@@ -648,7 +659,7 @@ export default function App() {
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      if (cloudOpen) return
+      if (cloudOpen || deleteProjectOpen) return
       const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.type.startsWith('image/'))
       const file = imageItem?.getAsFile()
       if (!file) return
@@ -657,7 +668,7 @@ export default function App() {
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [cloudOpen])
+  }, [cloudOpen, deleteProjectOpen])
 
   const processImage = async () => {
     if (!sourceImageUrl || preprocessing || learningWorking) return
@@ -676,6 +687,7 @@ export default function App() {
           const prediction = predictEnhancedLearningEdits(learningState.model, interactionModelRef.current, {
             width: layer.width, height: layer.height, source: result.sourcePixels.data,
             automatic: context.getImageData(0, 0, layer.width, layer.height).data, region: result.geometry.region,
+            gridLines: { horizontal: result.geometry.horizontal, vertical: result.geometry.vertical },
           })
           result.geometry.learnedCorrections = learningMasksToCorrections(prediction.add, prediction.erase, layer.width, layer.height)
           output = renderReconstruction(result.geometry, corrections, reconstructionColors, reconstructionWidths)
@@ -1233,6 +1245,7 @@ export default function App() {
         source: sourceContext.getImageData(0, 0, automatic.width, automatic.height).data,
         automatic: automaticContext.getImageData(0, 0, automatic.width, automatic.height).data,
         region: reconstruction.region,
+        gridLines: { horizontal: reconstruction.horizontal, vertical: reconstruction.vertical },
       })
       const learnedCorrections = learningMasksToCorrections(prediction.add, prediction.erase, automatic.width, automatic.height)
       const curveLayer = renderReconstructionCurveLayer(
@@ -1328,6 +1341,8 @@ export default function App() {
         curveColor,
         tolerance,
         scorePixel,
+        gridLines: reconstruction ? { horizontal: reconstruction.horizontal, vertical: reconstruction.vertical } : undefined,
+        plotRegion: reconstruction?.region ?? plotRegion ?? undefined,
       })
 
       if (!smart.curves.length) {
@@ -2187,6 +2202,87 @@ export default function App() {
     }
   }
 
+  const resetWorkspaceToBlank = (detachCloud = true) => {
+    const id = crypto.randomUUID()
+    const fresh: ProjectSnapshot = {
+      name: 'Untitled project',
+      activeId: id,
+      charts: [{ id, name: 'Chart 1', state: blankChart() }],
+    }
+    pointTrainingBaselines.current = {}
+    history.current = null
+    setHistoryAvailability({ undo: false, redo: false })
+    setShowTable(false)
+    setExportMenuOpen(false)
+    applyProject(fresh)
+    if (detachCloud) {
+      setActiveCloudProject(null)
+      setCloudResetKey((key) => key + 1)
+    }
+  }
+
+  const hasWorkspaceWork = () => {
+    const snapshot = currentProject()
+    if (activeCloudProject) return true
+    if (snapshot.name.trim() !== 'Untitled project') return true
+    if (snapshot.charts.length > 1) return true
+    const first = snapshot.charts[0]
+    if (!first) return false
+    if (first.name !== 'Chart 1') return true
+    return Boolean(
+      first.state.imageUrl
+      || first.state.sourceImageUrl
+      || first.state.datasets.length
+      || first.state.xAxis.points.length
+      || first.state.yAxis.points.length
+      || first.state.corrections.length,
+    )
+  }
+
+  const startNewProject = (): boolean => {
+    if (projectBusy) return false
+    if (hasWorkspaceWork() && !window.confirm('Start a new project? The current workspace will be cleared; save it first if needed.')) {
+      return false
+    }
+    resetWorkspaceToBlank(true)
+    showNotice('Started a new project.')
+    return true
+  }
+
+  const requestDeleteProject = () => {
+    if (projectBusy) return
+    setDeleteProjectError('')
+    setDeleteProjectOpen(true)
+  }
+
+  const handleActiveCloudProjectDeleted = (deleted: CloudProjectRow) => {
+    resetWorkspaceToBlank(false)
+    setActiveCloudProject(null)
+    showNotice(`Deleted cloud project "${deleted.name}".`)
+  }
+
+  const confirmDeleteCurrentProject = async () => {
+    setDeletingProject(true)
+    setDeleteProjectError('')
+    try {
+      if (activeCloudProject) {
+        const deleteFn = deleteActiveCloudRef.current
+        if (!deleteFn) throw new Error('Cloud project service is unavailable.')
+        await deleteFn(activeCloudProject)
+      } else {
+        const deletedName = projectName.trim() || 'Untitled project'
+        resetWorkspaceToBlank(true)
+        showNotice(`Deleted project "${deletedName}".`)
+      }
+      setDeleteProjectOpen(false)
+    } catch (error) {
+      setDeleteProjectError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? error.message : 'Could not delete the project.')
+    } finally {
+      setDeletingProject(false)
+    }
+  }
+
   const addCalibrationPoint = (axis: 'x' | 'y') => setMode(axis === 'x' ? 'calibrate-x' : 'calibrate-y')
   const updateScale = (axis: 'x' | 'y', scale: ScaleType) => {
     setCalibrationScales((current) => ({ ...current, [axis]: scale }))
@@ -2244,11 +2340,13 @@ export default function App() {
     <main className="app-frame" inert={learningWorking} onPointerDownCapture={() => { pointerTransaction.current = true; pointerRecorded.current = false }}>
       <header className="topbar">
         <a className="brand" href="#" aria-label="Plotline home"><span className="brand-mark"><span /><span /><span /></span><span>plotline</span><span className="brand-divider" /><span className="brand-subtitle">DIGITIZER</span></a>
-        <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><span className="saved-status"><span /> Browser session</span></div>
+        <div className="project-name"><span className="project-file-icon"><FileImage size={14} /></span><input aria-label="Project name" value={projectName} onChange={(event) => setProjectName(event.target.value)} /><span className="saved-status" title={activeCloudProject ? `Linked to cloud project "${activeCloudProject.name}"` : 'Stored in current browser session'}><span /> {activeCloudProject ? 'Cloud project' : 'Browser session'}</span></div>
         <div className="top-actions" inert={Boolean(rotationPreview)}>
+          <button className="top-quiet" disabled={projectBusy} onClick={() => { startNewProject() }}><FilePlus2 size={15} /> New project</button>
           <button className="top-quiet" disabled={projectBusy} onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project</button>
           <button className="top-quiet" disabled={projectBusy} onClick={() => setCloudOpen(true)}><FolderOpen size={15} /> Cloud projects</button>
-          <button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting)} onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save project</button>
+          <button className="top-quiet" disabled={Boolean(preprocessing || loading || gridDetecting || exporting || deletingProject)} onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save project</button>
+          <button className="top-quiet top-danger" disabled={projectBusy} onClick={requestDeleteProject} title={activeCloudProject ? `Delete cloud project "${activeCloudProject.name}"` : 'Delete current project'}><Trash2 size={15} /> Delete project</button>
           <div className="export-control" ref={exportMenu}>
             <button className="export-top export-main" onClick={() => { setExportMenuOpen(false); void exportExcel() }} disabled={projectBusy}><FileSpreadsheet size={15} /> Export Excel</button>
             <button ref={exportMenuButton} className="export-top export-toggle" aria-label="Other export formats" aria-expanded={exportMenuOpen} aria-controls="export-formats" disabled={projectBusy} onClick={() => setExportMenuOpen((open) => !open)}><ChevronDown size={15} /></button>
@@ -2618,7 +2716,7 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">RECONSTRUCTION</span><h2>Line appearance</h2></div></div><p className="section-copy">Select axes in Process image, or use the leftmost vertical and lowest horizontal lines by default. Verify them against the scan.</p>{(['curve', 'grid', 'axis'] as const).map((kind) => <label className="format-control" key={kind}><span>{kind} color</span><input aria-label={`Reconstructed ${kind} color`} type="color" disabled={preprocessing} value={reconstructionColors[kind]} onChange={(event) => updateReconstructionAppearance({ ...reconstructionColors, [kind]: event.target.value }, reconstructionWidths)} /></label>)}{(['curve', 'grid'] as const).map((kind) => <label className="range-row" key={kind}><span>{kind === 'grid' ? 'Grid and axis' : 'Curve'} thickness</span><strong>{reconstructionWidths[kind]} px</strong><input aria-label={`Reconstructed ${kind} thickness`} type="range" min="0.5" max="8" step="0.5" disabled={preprocessing} value={reconstructionWidths[kind]} onChange={(event) => updateReconstructionAppearance(reconstructionColors, { ...reconstructionWidths, [kind]: Number(event.target.value) })} /></label>)}</section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">CALIBRATION</span><h2>Marker appearance</h2></div></div><p className="section-copy">The selected calibration point uses this color. Confirmed calibration hides the markers.</p><label className="format-control"><span>Selected marker color</span><input aria-label="Selected calibration marker color" type="color" value={calibrationMarkerColor} onChange={(event) => setCalibrationMarkerColor(event.target.value)} /></label></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
-            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button></section>
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" disabled={projectBusy} onClick={() => { startNewProject() }}><FilePlus2 size={15} /> New project</button><button className="settings-action" onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button><button className="settings-action settings-danger" disabled={projectBusy} onClick={requestDeleteProject}><Trash2 size={15} /> Delete project</button></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">DIGITIZING</span><h2>Manual point editing</h2></div></div><p className="section-copy">By default, manually added points are inserted between their nearest X neighbors instead of appended to the end of the dataset.</p><label className="format-control"><span>Insert manual points between X neighbors</span><input aria-label="Settings insert manual points between X neighbors" type="checkbox" checked={insertPointsByX} onChange={(event) => setInsertPointsByX(event.target.checked)} /></label><p className="section-copy">Snap-to-curve search radius: {Math.round(interactionModel.snapRadius)} px (adapts from manual drags &amp; snaps).</p></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{onlineConfiguration.config ? 'Shared learning' : 'Local learning'}</h2></div></div>
               <p className="section-copy">{onlineConfiguration.config ? 'Learning syncs bounded numeric model updates (curve, point-spacing, and interaction AI) to Supabase, never images or raw coordinates. Updates are queued offline in IndexedDB and synced automatically.' : 'Learning stores numeric models and interaction preferences locally in IndexedDB, not training images.'} Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
@@ -2650,7 +2748,29 @@ export default function App() {
 
       <input ref={imageInput} type="file" accept="image/*" className="visually-hidden" aria-label="Choose plot image" onChange={(event) => { openImage(event.target.files?.[0]); event.target.value = '' }} />
       <input ref={projectInput} type="file" accept="application/json,.json" className="visually-hidden" aria-label="Open plot project" onChange={(event) => { void importProject(event.target.files?.[0]); event.target.value = '' }} />
-      <CloudProjects open={cloudOpen} onClose={() => setCloudOpen(false)} name={projectName} resetKey={cloudResetKey} saveProject={(name, save) => exportProject({ name, save })} openProject={(project) => importProject(new File([JSON.stringify(project)], 'cloud-project.json', { type: 'application/json' }), true)} />
+      <CloudProjects
+        open={cloudOpen}
+        onClose={() => setCloudOpen(false)}
+        name={projectName}
+        resetKey={cloudResetKey}
+        saveProject={(name, save) => exportProject({ name, save })}
+        openProject={(project) => importProject(new File([JSON.stringify(project)], 'cloud-project.json', { type: 'application/json' }), true)}
+        newProject={startNewProject}
+        onActiveProjectChange={setActiveCloudProject}
+        onActiveProjectDeleted={handleActiveCloudProjectDeleted}
+        registerDeleteActive={registerDeleteActive}
+      />
+      <DeleteProjectDialog
+        open={deleteProjectOpen}
+        projectName={activeCloudProject ? activeCloudProject.name : (projectName.trim() || 'Untitled project')}
+        description={activeCloudProject
+          ? 'Permanently delete this cloud project from your account and clear the current workspace? This action cannot be undone.'
+          : 'Delete this project and clear all charts, images, calibrations, and datasets in the current workspace? This action cannot be undone.'}
+        busy={deletingProject}
+        error={deleteProjectError}
+        onCancel={() => { if (!deletingProject) { setDeleteProjectOpen(false); setDeleteProjectError('') } }}
+        onConfirm={confirmDeleteCurrentProject}
+      />
       {notice && <div role="status" className={`toast ${notice.type ?? ''}`}><span className="toast-icon">{notice.type === 'error' ? '!' : <Check size={14} />}</span>{notice.message}<button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {loading && <div className="loading-overlay" aria-live="polite"><span className="loading-spinner" /> Following the curve…</div>}
     </main>

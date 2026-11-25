@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import type { Session } from '@supabase/supabase-js'
+import { Trash2 } from 'lucide-react'
 import { readOnlineLearningConfig } from '../lib/online-learning'
-import { writeCloudProject } from '../lib/cloud-projects'
+import { deleteCloudProject, writeCloudProject } from '../lib/cloud-projects'
 import type { CloudProjectRow } from '../lib/cloud-projects'
+import DeleteProjectDialog from './DeleteProjectDialog'
 
 type Props = {
   open: boolean
@@ -12,6 +14,10 @@ type Props = {
   resetKey: number
   saveProject: (name: string, save: (project: object) => Promise<void>) => Promise<boolean>
   openProject: (project: unknown) => Promise<boolean>
+  newProject: () => boolean
+  onActiveProjectChange?: (project: CloudProjectRow | null) => void
+  onActiveProjectDeleted?: (project: CloudProjectRow) => void
+  registerDeleteActive?: (fn: ((target: CloudProjectRow) => Promise<void>) | null) => void
 }
 
 const configuration = (() => {
@@ -23,7 +29,10 @@ const configuration = (() => {
   }
 })()
 
-export default function CloudProjects({ open, onClose, name, resetKey, saveProject, openProject }: Props) {
+export default function CloudProjects({
+  open, onClose, name, resetKey, saveProject, openProject, newProject,
+  onActiveProjectChange, onActiveProjectDeleted, registerDeleteActive,
+}: Props) {
   const client = configuration.client
   const [session, setSession] = useState<Session | null>(null)
   const [email, setEmail] = useState('')
@@ -33,10 +42,20 @@ export default function CloudProjects({ open, onClose, name, resetKey, saveProje
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [copyName, setCopyName] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<CloudProjectRow | null>(null)
+  const [deleteError, setDeleteError] = useState('')
   const dialog = useRef<HTMLElement>(null)
+  const onActiveProjectChangeRef = useRef(onActiveProjectChange)
+  const onActiveProjectDeletedRef = useRef(onActiveProjectDeleted)
+  onActiveProjectChangeRef.current = onActiveProjectChange
+  onActiveProjectDeletedRef.current = onActiveProjectDeleted
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      setDeleteTarget(null)
+      setDeleteError('')
+      return
+    }
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
     return () => { previous?.focus() }
@@ -56,7 +75,16 @@ export default function CloudProjects({ open, onClose, name, resetKey, saveProje
     return () => { active = false; subscription.unsubscribe() }
   }, [client])
 
-  useEffect(() => { setCurrent(null); setProjects([]) }, [session?.user.id, resetKey])
+  useEffect(() => {
+    setCurrent(null)
+    setProjects([])
+    setDeleteTarget(null)
+    setDeleteError('')
+  }, [session?.user.id])
+
+  useEffect(() => { setCurrent(null) }, [resetKey])
+
+  useEffect(() => { onActiveProjectChangeRef.current?.(current) }, [current])
 
   const listProjects = async () => {
     if (!client) throw new Error('Supabase is not configured.')
@@ -76,6 +104,25 @@ export default function CloudProjects({ open, onClose, name, resetKey, saveProje
     })
     return () => { active = false }
   }, [open, session?.user.id, client])
+
+  const removeCloudProject = async (target: CloudProjectRow) => {
+    if (!client || !session) throw new Error('Sign in before deleting a cloud project.')
+    await deleteCloudProject(client, target)
+    const wasCurrent = current?.id === target.id
+    setProjects((rows) => rows.filter((row) => row.id !== target.id))
+    if (wasCurrent) setCurrent(null)
+    try { await listProjects() } catch { /* local list already updated */ }
+    if (wasCurrent) onActiveProjectDeletedRef.current?.(target)
+  }
+
+  const removeCloudProjectRef = useRef(removeCloudProject)
+  removeCloudProjectRef.current = removeCloudProject
+
+  useEffect(() => {
+    if (!registerDeleteActive) return
+    registerDeleteActive((target) => removeCloudProjectRef.current(target))
+    return () => { registerDeleteActive(null) }
+  }, [registerDeleteActive])
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setMessage('')
@@ -130,40 +177,96 @@ export default function CloudProjects({ open, onClose, name, resetKey, saveProje
     }
   })
 
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    setBusy(true)
+    setDeleteError('')
+    setMessage('')
+    try {
+      const target = deleteTarget
+      const wasCurrent = current?.id === target.id
+      await removeCloudProject(target)
+      setDeleteTarget(null)
+      setMessage(`Deleted "${target.name}".`)
+      if (wasCurrent) onClose()
+    } catch (error) {
+      setDeleteError(error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? error.message : 'Could not delete the project.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!open) return null
-  return <div className="cloud-overlay">
-    <section ref={dialog} className="cloud-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-title" onKeyDown={(event) => {
-      if (event.key === 'Escape' && !busy) { event.stopPropagation(); onClose() }
-      if (event.key !== 'Tab') return
-      const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'))
-      if (!focusable.length) { event.preventDefault(); return }
-      const index = focusable.indexOf(document.activeElement as HTMLElement)
-      if (event.shiftKey && index <= 0) { event.preventDefault(); focusable[focusable.length - 1].focus() }
-      else if (!event.shiftKey && (index === -1 || index === focusable.length - 1)) { event.preventDefault(); focusable[0].focus() }
-    }}>
-      <div className="cloud-heading"><h2 id="cloud-title">Cloud projects</h2><button onClick={onClose} disabled={busy} aria-label="Close cloud projects">×</button></div>
-      {configuration.error && <p role="alert">{configuration.error}</p>}
-      {client && !session && <form onSubmit={(event) => { event.preventDefault(); void authenticate(false) }}>
-        <p>Sign in to access your private projects.</p>
-        <label>Email<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-        <label>Password<input type="password" required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-        <div className="cloud-actions"><button disabled={busy} type="submit">Sign in</button><button disabled={busy || !email || !password} type="button" onClick={() => void authenticate(true)}>Create account</button></div>
-      </form>}
-      {client && session && <>
-        <p>Signed in as {session.user.email}</p>
-        <div className="cloud-actions">
-          <button disabled={busy} onClick={() => void save(false, name)}>Save{current ? `: ${current.name}` : ''}</button>
-          <button disabled={busy} onClick={() => setCopyName(name)}>Save as</button>
-          <button disabled={busy} onClick={() => void run(async () => { const { error } = await client.auth.signOut(); if (error) throw error })}>Sign out</button>
-        </div>
-        {copyName !== null && <form onSubmit={(event) => { event.preventDefault(); void save(true, copyName) }}>
-          <label>New project name<input autoFocus maxLength={200} required value={copyName} onChange={(event) => setCopyName(event.target.value)} /></label>
-          <div className="cloud-actions"><button disabled={busy} type="submit">Save copy</button><button disabled={busy} type="button" onClick={() => setCopyName(null)}>Cancel</button></div>
+  return <>
+    <div className="cloud-overlay">
+      <section ref={dialog} className="cloud-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-title" onKeyDown={(event) => {
+        if (event.key === 'Escape' && !busy && !deleteTarget) { event.stopPropagation(); onClose() }
+        if (event.key !== 'Tab' || deleteTarget) return
+        const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'))
+        if (!focusable.length) { event.preventDefault(); return }
+        const index = focusable.indexOf(document.activeElement as HTMLElement)
+        if (event.shiftKey && index <= 0) { event.preventDefault(); focusable[focusable.length - 1].focus() }
+        else if (!event.shiftKey && (index === -1 || index === focusable.length - 1)) { event.preventDefault(); focusable[0].focus() }
+      }}>
+        <div className="cloud-heading"><h2 id="cloud-title">Cloud projects</h2><button onClick={onClose} disabled={busy} aria-label="Close cloud projects">×</button></div>
+        {configuration.error && <p role="alert">{configuration.error}</p>}
+        {client && !session && <form onSubmit={(event) => { event.preventDefault(); void authenticate(false) }}>
+          <p>Sign in to access your private projects.</p>
+          <label>Email<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+          <label>Password<input type="password" required autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+          <div className="cloud-actions"><button disabled={busy} type="submit">Sign in</button><button disabled={busy || !email || !password} type="button" onClick={() => void authenticate(true)}>Create account</button></div>
         </form>}
-        <h3>Open a project</h3>
-        <div className="cloud-list">{projects.length ? projects.map((project) => <button key={project.id} disabled={busy} onClick={() => void load(project)}><span>{project.name}</span><small>{new Date(project.updated_at).toLocaleString()}</small></button>) : <p>No saved projects.</p>}</div>
-      </>}
-      {message && <p role="status" className="cloud-message">{message}</p>}
-    </section>
-  </div>
+        {client && session && <>
+          <p>Signed in as {session.user.email}</p>
+          <div className="cloud-actions">
+            <button disabled={busy} onClick={() => { if (newProject()) { setCurrent(null); setCopyName(null); setDeleteTarget(null); onClose() } }}>New project</button>
+            <button disabled={busy} onClick={() => void save(false, name)}>Save{current ? `: ${current.name}` : ''}</button>
+            <button disabled={busy} onClick={() => setCopyName(name)}>Save as</button>
+            <button disabled={busy} onClick={() => void run(async () => { const { error } = await client.auth.signOut(); if (error) throw error })}>Sign out</button>
+          </div>
+          {copyName !== null && <form onSubmit={(event) => { event.preventDefault(); void save(true, copyName) }}>
+            <label>New project name<input autoFocus maxLength={200} required value={copyName} onChange={(event) => setCopyName(event.target.value)} /></label>
+            <div className="cloud-actions"><button disabled={busy} type="submit">Save copy</button><button disabled={busy} type="button" onClick={() => setCopyName(null)}>Cancel</button></div>
+          </form>}
+          <h3>Saved projects</h3>
+          <div className="cloud-list">
+            {projects.length ? projects.map((project) => (
+              <div key={project.id} className={`cloud-project-row ${current?.id === project.id ? 'active' : ''}`}>
+                <button className="cloud-project-open" disabled={busy} onClick={() => void load(project)}>
+                  <span className="cloud-project-name">
+                    <span>{project.name}</span>
+                    {current?.id === project.id && <em className="cloud-current-badge">Open</em>}
+                  </span>
+                  <small>{new Date(project.updated_at).toLocaleString()}</small>
+                </button>
+                <button
+                  type="button"
+                  className="cloud-project-delete"
+                  disabled={busy}
+                  title={`Delete ${project.name}`}
+                  aria-label={`Delete project ${project.name}`}
+                  onClick={() => { setDeleteError(''); setDeleteTarget(project) }}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            )) : <p>No saved projects.</p>}
+          </div>
+        </>}
+        {message && <p role="status" className="cloud-message">{message}</p>}
+      </section>
+    </div>
+    <DeleteProjectDialog
+      open={Boolean(deleteTarget)}
+      projectName={deleteTarget?.name ?? ''}
+      description={deleteTarget && current?.id === deleteTarget.id
+        ? 'Permanently delete this cloud project from your account? Because it is currently open, your workspace will also be cleared. This action cannot be undone.'
+        : 'Permanently delete this cloud project from your account? This action cannot be undone.'}
+      busy={busy}
+      error={deleteError}
+      onCancel={() => { if (!busy) { setDeleteTarget(null); setDeleteError('') } }}
+      onConfirm={confirmDelete}
+    />
+  </>
 }

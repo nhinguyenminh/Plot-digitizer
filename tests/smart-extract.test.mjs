@@ -121,3 +121,72 @@ test('smartExtractCurvesFromLayer handles near-vertical curves and bridges small
   assert.ok(curve[0].y < 25 && curve[curve.length - 1].y > 135, 'should trace full vertical span')
   assert.ok(curve.length >= 6, 'should sample evenly along the steep curve')
 })
+
+test('smartExtractCurvesFromLayer suppresses solid and dashed gridlines in raw dark mode', () => {
+  const plot = createRgba(200, 160, [255, 255, 255, 255])
+  // Solid outer border and major gridlines
+  for (const y of [20, 80, 140]) drawStroke(plot, 20, y, 180, y, [30, 30, 30, 255], 1)
+  for (const x of [20, 100, 180]) drawStroke(plot, x, 20, x, 140, [30, 30, 30, 255], 1)
+  // Dashed minor horizontal gridline at y=50 and y=110
+  for (const y of [50, 110]) {
+    for (let x = 22; x < 178; x += 12) drawStroke(plot, x, y, Math.min(178, x + 5), y, [40, 40, 40, 255], 1)
+  }
+  // Real diagonal data curve across the grid
+  drawStroke(plot, 28, 128, 172, 32, [0, 0, 0, 255], 3)
+
+  const result = smartExtractCurvesFromLayer(plot, {
+    spacing: 20,
+    mode: 'dark',
+    plotRegion: { x: 20, y: 20, width: 160, height: 120 },
+  })
+  assert.equal(result.curves.length, 1, `expected only 1 curve and no gridlines, got ${result.curves.length}`)
+  const curve = result.curves[0]
+  assert.ok(curve[0].x < 40 && curve[curve.length - 1].x > 160, 'curve should span across the grid')
+  assert.ok(curve[0].y > 110 && curve[curve.length - 1].y < 50, 'curve should preserve diagonal slope')
+})
+
+test('smartExtractCurvesFromLayer filters leaked gridline remnants in isolated mode', () => {
+  const layer = createRgba(200, 160, [0, 0, 0, 0])
+  // Leaked horizontal and vertical gridlines on the isolated curve layer
+  drawStroke(layer, 15, 40, 185, 40, [0, 102, 255, 255], 2)
+  drawStroke(layer, 15, 110, 185, 110, [0, 102, 255, 255], 2)
+  drawStroke(layer, 90, 15, 90, 145, [0, 102, 255, 255], 2)
+  // Real curved parabola
+  for (let x = 25; x < 175; x++) {
+    const y0 = 130 - 0.012 * (x - 100) ** 2
+    const y1 = 130 - 0.012 * (x + 1 - 100) ** 2
+    drawStroke(layer, x, y0, x + 1, y1, [0, 102, 255, 255], 3)
+  }
+
+  const result = smartExtractCurvesFromLayer(layer, {
+    spacing: 20,
+    mode: 'isolated',
+    gridLines: { horizontal: [40, 110], vertical: [90] },
+    plotRegion: { x: 15, y: 15, width: 170, height: 130 },
+  })
+  assert.equal(result.curves.length, 1, `expected only the real curve after filtering grid remnants, got ${result.curves.length}`)
+  assert.ok(result.gridLinesFiltered >= 1, 'expected leaked gridlines to be counted as filtered')
+})
+
+test('detectReconstruction strips dashed and tinted gridlines while keeping real curves intact', () => {
+  const plot = createRgba(180, 140, [255, 255, 255, 255])
+  // Dashed neutral horizontal gridlines at y=40 and y=100
+  for (const y of [40, 100]) {
+    for (let x = 15; x < 165; x += 12) drawStroke(plot, x, y, Math.min(165, x + 4), y, [40, 40, 40, 255], 1)
+  }
+  // Light blue-tinted vertical gridlines at x=50 and x=130 (chroma = 60 >= 32)
+  for (const x of [50, 130]) drawStroke(plot, x, 15, x, 125, [110, 150, 170, 255], 1)
+  // Vivid red curve crossing both dashed horizontal and tinted vertical gridlines
+  drawStroke(plot, 20, 115, 160, 25, [220, 20, 30, 255], 2)
+
+  const result = detectReconstruction(plot, { x: 15, y: 15, width: 150, height: 110 }, { horizontal: [], vertical: [] })
+  assert.ok(result.horizontal.some((y) => Math.abs(y - 40) <= 1), `expected dashed horizontal grid at 40, got ${result.horizontal}`)
+  assert.ok(result.horizontal.some((y) => Math.abs(y - 100) <= 1), `expected dashed horizontal grid at 100, got ${result.horizontal}`)
+  assert.ok(result.vertical.some((x) => Math.abs(x - 50) <= 1), `expected tinted vertical grid at 50, got ${result.vertical}`)
+  assert.ok(result.vertical.some((x) => Math.abs(x - 130) <= 1), `expected tinted vertical grid at 130, got ${result.vertical}`)
+  // No leftover horizontal/vertical gridline paths in curves
+  const curvePts = result.curves.flat()
+  assert.ok(curvePts.some((pt) => Math.hypot(pt.x - 90, pt.y - 70) < 4), 'red curve should survive across dashed and tinted grids')
+  assert.ok(!curvePts.some((pt) => Math.abs(pt.y - 40) <= 1 && pt.x < 60), 'dashed gridline away from curve should not remain as curve')
+  assert.ok(!curvePts.some((pt) => Math.abs(pt.x - 50) <= 1 && pt.y < 55), 'tinted vertical gridline away from curve should not remain as curve')
+})
