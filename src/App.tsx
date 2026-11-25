@@ -2,14 +2,16 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   Activity, ArrowDownToLine, Axis3D, Check, ChevronDown, CircleHelp, Crosshair, Crop, FileImage, FileJson2,
   Eye, FilePlus2, FileSpreadsheet, FlipHorizontal, FlipVertical, FolderOpen, Gauge, GripVertical, ImagePlus, Layers, LineChart,
-  Magnet, MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Settings2, Sparkles,
+  Magnet, MousePointer2, MoveUpRight, Pencil, RotateCcw, RotateCw, Ruler, ScanSearch, Scissors, Settings2, SlidersHorizontal, Sparkles,
   Target, Trash2, Undo2, Redo2, Upload,
 } from 'lucide-react'
 import PlotCanvas from './components/PlotCanvas'
 import ImagePreparationPanel from './components/ImagePreparationPanel'
 import CloudProjects from './components/CloudProjects'
 import DeleteProjectDialog from './components/DeleteProjectDialog'
+import BreakDatasetDialog from './components/BreakDatasetDialog'
 import type { CloudProjectRow } from './lib/cloud-projects'
+import { breakDatasetAtSegment, suggestSplitDatasetName } from './lib/dataset-break'
 import type { RotationPreview } from './components/DeskewPanel'
 import { detectPlotAxes, detectPlotGrid } from './lib/image-processing'
 import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-processing'
@@ -107,7 +109,7 @@ const formatAxisValue = (value: number, scale: ScaleType, precision: number) => 
 const modeLabels: Record<ToolMode, string> = {
   select: 'Select', 'calibrate-x': 'Set X calibration', 'calibrate-y': 'Set Y calibration',
   'calibrate-four': 'Four-point calibration', 'calibrate-intersections': 'Two-intersection calibration', 'calibrate-edit': 'Modify calibration',
-  point: 'Add data points', 'point-edit': 'Modify curve points',
+  point: 'Add data points', 'point-edit': 'Modify curve points', 'break-dataset': 'Break dataset',
   surge: 'Trace surge boundary', choke: 'Trace choke boundary', speed: 'Trace speed line', measure: 'Measure distance',
   'trace-region': 'Paint curve region',
   'grid-horizontal': 'Guide horizontal grid', 'grid-vertical': 'Guide vertical grid', 'guide-axis-x': 'Set X axis', 'guide-axis-y': 'Set Y axis', crop: 'Crop image',
@@ -235,6 +237,11 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [tolerance, setTolerance] = useState(76)
   const [sampleStep, setSampleStep] = useState(20)
+  const [aiOptionsOpen, setAiOptionsOpen] = useState(false)
+  const [aiCurvatureBias, setAiCurvatureBias] = useState(1)
+  const [aiMinCurveLength, setAiMinCurveLength] = useState(14)
+  const [aiMaxGap, setAiMaxGap] = useState(24)
+  const [aiUseLearnedSpacing, setAiUseLearnedSpacing] = useState(true)
   const [traceBrushWidth, setTraceBrushWidth] = useState(24)
   const [brushGroup, setBrushGroup] = useState(BRUSH_GROUPS[0].color)
   const [pointMarkerSize, setPointMarkerSize] = useState(100)
@@ -280,6 +287,7 @@ export default function App() {
   const [deleteProjectOpen, setDeleteProjectOpen] = useState(false)
   const [deletingProject, setDeletingProject] = useState(false)
   const [deleteProjectError, setDeleteProjectError] = useState('')
+  const [breakCandidate, setBreakCandidate] = useState<{ datasetId: string; segmentIndex: number; secondColor: string } | null>(null)
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
@@ -349,6 +357,7 @@ export default function App() {
     setCalibrationScales(state.calibrationScales)
     setShowOriginalPreview(false); setShowBackground(true); setRotationPreview(null)
     setSelectedPointHint(null)
+    setBreakCandidate(null)
     interactionPixelsCache.current = null
     setPointSelectionVersion((version) => version + 1)
   }
@@ -413,17 +422,20 @@ export default function App() {
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
-      if (pendingTrace || cloudOpen || deleteProjectOpen) return
+      if (pendingTrace || cloudOpen || deleteProjectOpen || breakCandidate) return
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.metaKey || event.ctrlKey || event.altKey) return
       if (event.key === 'Escape') setMode('select')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'p') setMode('point')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'a') setMode('trace-region')
       if (workflowStep === 'digitize' && event.key.toLowerCase() === 'm') setMode('point-edit')
+      if (workflowStep === 'digitize' && event.key.toLowerCase() === 'b' && datasets.some((dataset) => dataset.points.length >= 2)) {
+        setMode((current) => current === 'break-dataset' ? 'select' : 'break-dataset')
+      }
       if (workflowStep === 'calibration' && calibrationPhase === 'points' && event.key.toLowerCase() === 'c') setMode('calibrate-edit')
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking, cloudOpen, deleteProjectOpen])
+  }, [workflowStep, calibrationPhase, pendingTrace, learningWorking, cloudOpen, deleteProjectOpen, breakCandidate, datasets])
 
   const activeDataset = datasets.find((dataset) => dataset.id === activeId) ?? datasets[0]
   const learnedSampleStep = effectiveSampleStep(sampleStep, pointSpacingModel.factor, interactionModel)
@@ -569,7 +581,7 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target
-      if (cloudOpen || deleteProjectOpen || !(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
+      if (cloudOpen || deleteProjectOpen || breakCandidate || !(event.ctrlKey || event.metaKey) || event.altKey || target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
         || (target instanceof HTMLElement && target.isContentEditable)) return
       const key = event.key.toLowerCase()
@@ -659,7 +671,7 @@ export default function App() {
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
-      if (cloudOpen || deleteProjectOpen) return
+      if (cloudOpen || deleteProjectOpen || breakCandidate) return
       const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.type.startsWith('image/'))
       const file = imageItem?.getAsFile()
       if (!file) return
@@ -668,7 +680,7 @@ export default function App() {
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [cloudOpen, deleteProjectOpen])
+  }, [cloudOpen, deleteProjectOpen, breakCandidate])
 
   const processImage = async () => {
     if (!sourceImageUrl || preprocessing || learningWorking) return
@@ -1334,9 +1346,14 @@ export default function App() {
         ? (x: number, y: number) => predictRichPixelScore(interactionModelRef.current, learningPixels, x, y)
         : undefined
 
+      const aiSpacing = aiUseLearnedSpacing ? learnedSampleStep : sampleStep
+      const aiCurvature = Math.max(0.6, Math.min(1.6, aiCurvatureBias * (aiUseLearnedSpacing ? interactionModelRef.current.curvatureBias : 1)))
+
       const smart = smartExtractCurvesFromLayer(curveImage, {
-        spacing: learnedSampleStep,
-        curvatureBias: interactionModelRef.current.curvatureBias,
+        spacing: aiSpacing,
+        curvatureBias: aiCurvature,
+        minCurveLength: aiMinCurveLength,
+        maxGap: aiMaxGap,
         mode: extractMode,
         curveColor,
         tolerance,
@@ -1767,6 +1784,47 @@ export default function App() {
     } else if (activeId === id) activateDataset(remaining[0]?.id ?? '')
     else setSelectedDatasetIds((current) => current.filter((item) => item !== id))
     setPointSelectionVersion((version) => version + 1)
+  }
+
+  const handleBreakDatasetSegment = (datasetId: string, segmentIndex: number) => {
+    if (projectBusy || pendingTrace) return
+    const dataset = datasets.find((item) => item.id === datasetId)
+    if (!dataset || dataset.points.length < 2 || segmentIndex < 0 || segmentIndex >= dataset.points.length - 1) return
+    setBreakCandidate({
+      datasetId,
+      segmentIndex,
+      secondColor: nextDatasetColor(datasets.length + 1, datasets),
+    })
+  }
+
+  const confirmBreakDataset = (firstName: string, secondName: string) => {
+    if (!breakCandidate) return
+    const targetIndex = datasets.findIndex((item) => item.id === breakCandidate.datasetId)
+    const target = targetIndex >= 0 ? datasets[targetIndex] : null
+    if (!target) { setBreakCandidate(null); return }
+    try {
+      const [first, second] = breakDatasetAtSegment(target, breakCandidate.segmentIndex, {
+        firstName,
+        secondName,
+        secondColor: breakCandidate.secondColor,
+      })
+      delete pointTrainingBaselines.current[target.id]
+      if (brushTraceIds.current.includes(target.id)) {
+        brushTraceIds.current = [...brushTraceIds.current, second.id]
+      }
+      setDatasets((current) => {
+        const index = current.findIndex((item) => item.id === target.id)
+        if (index < 0) return current
+        return [...current.slice(0, index), first, second, ...current.slice(index + 1)]
+      })
+      activateDataset(second.id)
+      setPointSelectionVersion((version) => version + 1)
+      setBreakCandidate(null)
+      showNotice(`Split into "${first.name}" (${first.points.length} pts) and "${second.name}" (${second.points.length} pts). Use Undo if needed.`)
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : 'Could not break the dataset.', 'error')
+      setBreakCandidate(null)
+    }
   }
 
   const cropImage = async (rect: { x: number; y: number; width: number; height: number }) => {
@@ -2453,10 +2511,14 @@ export default function App() {
             <button className={`tool-button ${mode === 'calibrate-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'calibrate-edit' ? 'select' : 'calibrate-edit')} disabled={!imagePrepared || xAxis.points.length + yAxis.points.length === 0}><span className="tool-icon"><MoveUpRight size={16} /></span><span>Modify calibration</span><kbd>C</kbd></button>
             </>}
             {workflowStep === 'digitize' && <><div className="tool-group-label tool-gap">DIGITIZE</div>
-            <button className="tool-button" onClick={() => { void smartAutoExtractPoints() }} disabled={!imagePrepared || loading || preprocessing} title="Automatically trace all curves through crossings and place curvature-adaptive points on curve centerlines"><span className="tool-icon"><Sparkles size={16} /></span><span>Smart auto points (AI)</span></button>
+            <div className="tool-split">
+              <button className={`tool-button ${aiOptionsOpen ? 'selected' : ''}`} onClick={() => { setAiOptionsOpen(true); setActivePanel('data'); void smartAutoExtractPoints() }} disabled={!imagePrepared || loading || preprocessing} title="Automatically trace all curves through crossings and place curvature-adaptive points on curve centerlines"><span className="tool-icon"><Sparkles size={16} /></span><span>Smart auto points (AI)</span></button>
+              <button className={`tool-sub-action ${aiOptionsOpen ? 'active' : ''}`} onClick={() => { setAiOptionsOpen((open) => !open); setActivePanel('data') }} disabled={!imagePrepared || preprocessing} aria-label="AI extraction settings" aria-expanded={aiOptionsOpen} title="Configure AI point spacing and extraction parameters"><SlidersHorizontal size={13} /></button>
+            </div>
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
+            <button className={`tool-button ${mode === 'break-dataset' ? 'selected' : ''}`} onClick={() => setMode(mode === 'break-dataset' ? 'select' : 'break-dataset')} disabled={!imagePrepared || !datasets.some((dataset) => dataset.points.length >= 2)} title="Click the line segment between two points to split into two separate datasets"><span className="tool-icon"><Scissors size={16} /></span><span>Break dataset</span><kbd>B</kbd></button>
             <div className="tool-split">
               <button className="tool-button" onClick={() => { void snapPointsToCurve('selected') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => (selectedDatasetIds.length > 1 ? selectedDatasetIds.includes(dataset.id) : dataset.id === activeDataset?.id) && dataset.kind !== 'measurement' && dataset.points.length > 0)} title={`Align slightly off-curve points in the active/selected dataset onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}><span className="tool-icon"><Magnet size={16} /></span><span>Snap to curve</span></button>
               <button className="tool-sub-action" onClick={() => { void snapPointsToCurve('all') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => dataset.kind !== 'measurement' && dataset.points.length > 0)} aria-label="Snap all datasets to curve" title={`Snap ALL curve datasets in this chart onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}>All</button>
@@ -2513,6 +2575,7 @@ export default function App() {
               readOnly={Boolean(pendingTrace || rotationPreview || gridDetecting)}
               onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} canDeletePoint={workflowStep === 'digitize'}
               onDeleteSelectedPoint={deletePointAtIndex}
+              onBreakDatasetSegment={handleBreakDatasetSegment}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
               onCropSelection={(rect) => { void cropImage(rect) }}
               onRegionSelection={(rect) => {
@@ -2528,7 +2591,7 @@ export default function App() {
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Auto paint only marks regions; refine the paint, then use Get points to extract and learn from your edits.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point; use arrow keys right away to nudge (Shift moves 10 px).'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'break-dataset' ? ' · Click the line segment between two points to break it into two separate datasets.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Auto paint only marks regions; refine the paint, then use Get points to extract and learn from your edits.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point; use arrow keys right away to nudge (Shift moves 10 px).'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && workflowStep === 'digitize' && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -2690,16 +2753,56 @@ export default function App() {
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" disabled={Boolean(pendingTrace)} onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
+            {aiOptionsOpen && <section className="panel-section extraction-section ai-extraction-section">
+              <div className="section-heading">
+                <div><span className="section-kicker">AI EXTRACTION</span><h2>Smart auto points</h2></div>
+                <button type="button" className="ai-panel-close" aria-label="Close AI extraction settings" onClick={() => setAiOptionsOpen(false)}>×</button>
+              </div>
+              <p className="section-copy">Tune point density and curve filtering before extracting or regenerating AI points.</p>
+              <label className="range-row">
+                <span>Point spacing</span>
+                <strong>{sampleStep} px{aiUseLearnedSpacing && learnedSampleStep !== sampleStep ? ` (→ ${learnedSampleStep} px)` : ''}</strong>
+                <input aria-label="AI point spacing" type="range" min="4" max="80" step="1" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} />
+              </label>
+              <label className="range-row">
+                <span>Bend detail (curvature)</span>
+                <strong>{aiCurvatureBias.toFixed(1)}×</strong>
+                <input aria-label="AI curvature detail" type="range" min="0.6" max="1.6" step="0.1" value={aiCurvatureBias} onChange={(event) => setAiCurvatureBias(Number(event.target.value))} />
+              </label>
+              <label className="range-row">
+                <span>Min curve length</span>
+                <strong>{aiMinCurveLength} px</strong>
+                <input aria-label="AI minimum curve length" type="range" min="8" max="120" step="2" value={aiMinCurveLength} onChange={(event) => setAiMinCurveLength(Number(event.target.value))} />
+              </label>
+              <label className="range-row">
+                <span>Max gap bridge</span>
+                <strong>{aiMaxGap} px</strong>
+                <input aria-label="AI maximum gap bridge" type="range" min="0" max="60" step="2" value={aiMaxGap} onChange={(event) => setAiMaxGap(Number(event.target.value))} />
+              </label>
+              <label className="format-control">
+                <span>Adapt spacing from AI learning</span>
+                <input aria-label="Adapt AI spacing from learning" type="checkbox" checked={aiUseLearnedSpacing} onChange={(event) => setAiUseLearnedSpacing(event.target.checked)} />
+              </label>
+              <div className="prep-actions trace-actions">
+                <button className="prep-apply" disabled={!imagePrepared || loading || preprocessing} onClick={() => { void smartAutoExtractPoints() }}>
+                  <Sparkles size={13} /> {brushTraceIds.current.length ? 'Regenerate AI points' : 'Extract AI points'}
+                </button>
+                <button type="button" className="prep-compare" disabled={loading} onClick={() => { setSampleStep(20); setAiCurvatureBias(1); setAiMinCurveLength(14); setAiMaxGap(24); setAiUseLearnedSpacing(true) }}>
+                  Reset defaults
+                </button>
+              </div>
+              <div className="trace-hint">Smaller point spacing creates more points; larger spacing makes curves sparser while still locking peaks and sharp bends.</div>
+            </section>}
             {mode === 'trace-region' || mode === 'speed' || (mode === 'point-edit' && brushMarks.some((mark) => !mark.erase)) ? <section className="panel-section extraction-section">
               <div className="section-heading"><div><span className="section-kicker">CURVE EXTRACTION</span><h2>{mode === 'trace-region' ? 'Painted curve finder' : 'Automatic curve finder'}</h2></div><ScanSearch size={16} /></div>
               <p className="section-copy">{mode === 'speed' ? <>Click the speed line, or use Paint curve region for a guided trace. Sampled color <span className="color-chip" style={{ backgroundColor: `rgb(${seedColor.join(',')})` }} /> RGB {seedColor.join(', ')}</> : 'Auto paint marks likely curve regions only. Add or erase paint manually, then press Get points to extract and learn from your edits.'}</p>
               <label className="range-row"><span>Color tolerance</span><strong>{tolerance}</strong><input aria-label="Curve color tolerance" type="range" min="12" max="180" disabled={mode === 'trace-region' && (showOriginalPreview || !processedImageUrl || Boolean(reconstruction && !needsProcess))} value={tolerance} onChange={(event) => setTolerance(Number(event.target.value))} /></label>
-              <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="60" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
+              <label className="range-row"><span>Point spacing</span><strong>{sampleStep} px</strong><input aria-label="Curve point spacing" type="range" min="1" max="80" value={sampleStep} onChange={(event) => setSampleStep(Number(event.target.value))} /></label>
               <label className="range-row"><span>Paint brush width</span><strong>{traceBrushWidth} px</strong><input aria-label="Curve brush width" type="range" min="8" max="72" step="2" value={traceBrushWidth} onChange={(event) => setTraceBrushWidth(Number(event.target.value))} /></label>
               {(mode === 'trace-region' || mode === 'point-edit') && <>
                 {mode === 'trace-region' && <><div className="brush-groups" role="group" aria-label="Brush color group">{BRUSH_GROUPS.map((group) => <button key={group.color} aria-label={`${group.name} brush`} aria-pressed={brushGroup === group.color} onClick={() => { setBrushGroup(group.color); setBrushErasing(false) }}><span style={{ backgroundColor: group.color }} />{group.name}</button>)}</div><div className="brush-tools" role="group" aria-label="Brush selection tool"><button aria-pressed={!brushErasing} onClick={() => setBrushErasing(false)}>Brush</button><button aria-pressed={brushErasing} onClick={() => setBrushErasing(true)}>Erase selected color</button></div></>}
                 <div className="prep-actions trace-actions">
-                  {mode === 'trace-region' && <button className="prep-apply clear-brushes" disabled={!imagePrepared || loading || preprocessing} title="Trace all detected curves cleanly through crossings with curvature-adaptive points" onClick={() => { void smartAutoExtractPoints() }}><Sparkles size={13} /> Smart auto points (AI)</button>}
+                  {mode === 'trace-region' && <button className="prep-apply clear-brushes" disabled={!imagePrepared || loading || preprocessing} title="Trace all detected curves cleanly through crossings with curvature-adaptive points" onClick={() => { setAiOptionsOpen(true); void smartAutoExtractPoints() }}><Sparkles size={13} /> Smart auto points (AI)</button>}
                   {mode === 'trace-region' && <button className="prep-compare" disabled={!imagePrepared || !processedImageUrl || !reconstruction || needsProcess || !learningState?.enabled || ((learningState?.model.samples ?? 0) < 1 && interactionModel.featureSamples < 1) || loading} title="Requires a processed image and an enabled, trained local curve or interaction model" onClick={() => { void autoPaintWithModel() }}><Sparkles size={13} /> Auto paint (ML)</button>}
                   <button className="prep-apply" disabled={!brushMarks.some((mark) => !mark.erase) || loading} onClick={() => { void autoPaintedPoints() }}>{mode === 'point-edit' ? 'Regenerate points' : 'Get points'}</button>
                   <button className="prep-compare clear-brushes" disabled={!brushMarks.length || loading} onClick={() => setBrushMarks([])}>Clear all brushes</button>
@@ -2771,6 +2874,23 @@ export default function App() {
         onCancel={() => { if (!deletingProject) { setDeleteProjectOpen(false); setDeleteProjectError('') } }}
         onConfirm={confirmDeleteCurrentProject}
       />
+      {(() => {
+        const target = breakCandidate ? datasets.find((dataset) => dataset.id === breakCandidate.datasetId) : null
+        return (
+          <BreakDatasetDialog
+            open={Boolean(target && breakCandidate)}
+            sourceName={target?.name ?? ''}
+            firstCount={breakCandidate ? breakCandidate.segmentIndex + 1 : 0}
+            secondCount={target && breakCandidate ? target.points.length - (breakCandidate.segmentIndex + 1) : 0}
+            firstColor={target?.color ?? '#2dd4bf'}
+            secondColor={breakCandidate?.secondColor ?? '#60a5fa'}
+            defaultFirstName={target?.name ?? ''}
+            defaultSecondName={target ? suggestSplitDatasetName(target.name, datasets) : ''}
+            onCancel={() => setBreakCandidate(null)}
+            onConfirm={confirmBreakDataset}
+          />
+        )
+      })()}
       {notice && <div role="status" className={`toast ${notice.type ?? ''}`}><span className="toast-icon">{notice.type === 'error' ? '!' : <Check size={14} />}</span>{notice.message}<button aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button></div>}
       {loading && <div className="loading-overlay" aria-live="polite"><span className="loading-spinner" /> Following the curve…</div>}
     </main>

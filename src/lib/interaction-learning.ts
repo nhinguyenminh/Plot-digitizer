@@ -611,7 +611,7 @@ export function effectiveSampleStep(baseStep: number, legacySpacingFactor: numbe
   const combined = interactionModel.spacingSamples > 0
     ? interactionModel.spacingFactor * (0.5 + 0.5 * legacySpacingFactor)
     : legacySpacingFactor
-  return Math.min(60, Math.max(1, Math.round(baseStep * combined)))
+  return Math.min(80, Math.max(1, Math.round(baseStep * combined)))
 }
 
 function legacyFeatures(pixels: LearningPixels, index: number): number[] {

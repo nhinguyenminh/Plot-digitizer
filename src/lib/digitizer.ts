@@ -1,7 +1,7 @@
 import type { DetectedPlotGrid } from './image-processing'
 
 export type PlotType = 'xy' | 'bar' | 'polar' | 'ternary' | 'map' | 'measurement' | 'compressor'
-export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase' | 'prep-heal' | 'prep-straighten'
+export type ToolMode = 'select' | 'calibrate-x' | 'calibrate-y' | 'calibrate-four' | 'calibrate-intersections' | 'calibrate-edit' | 'point' | 'point-edit' | 'break-dataset' | 'surge' | 'choke' | 'speed' | 'measure' | 'trace-region' | 'grid-horizontal' | 'grid-vertical' | 'guide-axis-x' | 'guide-axis-y' | 'crop' | 'prep-region' | 'prep-draw' | 'prep-line' | 'prep-erase' | 'prep-heal' | 'prep-straighten'
 export type ScaleType = 'linear' | 'log' | 'inverse' | 'date'
 export type DatasetKind = 'curve' | 'surge' | 'choke' | 'speed' | 'efficiency' | 'measurement'
 
