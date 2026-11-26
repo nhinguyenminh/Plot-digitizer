@@ -29,6 +29,7 @@ interface Props {
   showBackground: boolean
   datasets: Dataset[]
   activeDatasetId: string
+  selectedDatasetIds?: string[]
   selectionVersion: number
   selectedPointHint?: { datasetId: string; index: number; version: number } | null
   onSelectDataset: (id: string) => void
@@ -79,7 +80,7 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, selectedPointHint, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, breakDatasetMode = 'point', onBreakDatasetPoint, onBreakDatasetSegment, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onPointMoveEnd, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectedDatasetIds, selectionVersion, selectedPointHint, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, breakDatasetMode = 'point', onBreakDatasetPoint, onBreakDatasetSegment, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onPointMoveEnd, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -187,6 +188,23 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     window.addEventListener('keydown', key)
     return () => { window.removeEventListener('pointerdown', dismiss); window.removeEventListener('keydown', key) }
   }, [contextMenu])
+  useEffect(() => {
+    if (readOnly || mode !== 'point-edit' || !selectedPoint) return
+    const handleWindowDelete = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return
+      const target = event.target
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
+        || (target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest('.dataset-select'))))) return
+      const selectedDataset = datasets.find((dataset) => dataset.id === selectedPoint.datasetId)
+      if (!selectedDataset?.points[selectedPoint.index]) return
+      event.preventDefault()
+      onDeleteSelectedPoint(selectedPoint.datasetId, selectedPoint.index)
+      setSelectedPoint(null)
+    }
+    window.addEventListener('keydown', handleWindowDelete)
+    return () => window.removeEventListener('keydown', handleWindowDelete)
+  }, [readOnly, mode, selectedPoint, datasets, onDeleteSelectedPoint])
   useEffect(() => setSelectedPoint((current) => current?.datasetId === activeDatasetId ? current : null), [activeDatasetId])
   useEffect(() => setSelectedPoint(null), [selectionVersion])
   useEffect(() => {
@@ -220,7 +238,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillStyle = '#ffffff'
       context.fillRect(0, 0, image.naturalWidth, image.naturalHeight)
     }
-    drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100, activeDatasetId)
+    drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100, activeDatasetId, selectedDatasetIds)
     if (hoveredBreakPoint) {
       const { point } = hoveredBreakPoint
       const outerRadius = Math.max(3, image.width / 260) * pointMarkerSize / 100 + 7
@@ -324,7 +342,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillText(`${axis.toUpperCase()}${index + 1}`, labelRect.x + 4, labelRect.y + labelHeight / 2 + fontSize * 0.35)
     })
     context.restore()
-  }, [datasets, activeDatasetId, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground, hoveredBreakPoint, hoveredBreakSegment])
+  }, [datasets, activeDatasetId, selectedDatasetIds, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground, hoveredBreakPoint, hoveredBreakSegment])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; displayImageRef.current = null; sourceCanvasRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -377,7 +395,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     context.drawImage(display ?? sourceCanvas, sourceLeft * scaleX, sourceTop * scaleY, sourceSize * scaleX, sourceSize * scaleY, 0, 0, lensCanvas.width, lensCanvas.height)
     const mapX = (x: number) => (x - sourceLeft) * lensCanvas.width / sourceSize
     const mapY = (y: number) => (y - sourceTop) * lensCanvas.height / sourceSize
-    drawDatasets(context, datasets, (point) => ({ x: mapX(point.x), y: mapY(point.y) }), 2, 2.5 * pointMarkerSize / 100, activeDatasetId)
+    drawDatasets(context, datasets, (point) => ({ x: mapX(point.x), y: mapY(point.y) }), 2, 2.5 * pointMarkerSize / 100, activeDatasetId, selectedDatasetIds)
     if (hoveredBreakPoint) {
       const px = mapX(hoveredBreakPoint.point.x)
       const py = mapY(hoveredBreakPoint.point.y)
@@ -497,7 +515,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     context.moveTo(0, lensCanvas.height / 2)
     context.lineTo(lensCanvas.width, lensCanvas.height / 2)
     context.stroke()
-  }, [cursor, datasets, activeDatasetId, selectedPoint, hoveredBreakPoint, hoveredBreakSegment, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
+  }, [cursor, datasets, activeDatasetId, selectedDatasetIds, selectedPoint, hoveredBreakPoint, hoveredBreakSegment, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
 
   const toImagePoint = (event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>) => {
     const canvas = canvasRef.current!
@@ -544,7 +562,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       }
     }
     const selectedDataset = datasets.find((dataset) => dataset.id === selectedPoint?.datasetId)
-    if (event.key === 'Delete' && mode === 'point-edit' && selectedPoint && selectedDataset?.points[selectedPoint.index]) {
+    if ((event.key === 'Delete' || event.key === 'Backspace') && mode === 'point-edit' && selectedPoint && selectedDataset?.points[selectedPoint.index]) {
       event.preventDefault()
       onDeleteSelectedPoint(selectedPoint.datasetId, selectedPoint.index)
       setSelectedPoint(null)

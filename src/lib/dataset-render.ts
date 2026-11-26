@@ -7,10 +7,23 @@ export function drawDatasets(
   lineWidth: number,
   pointRadius: number,
   activeDatasetId?: string,
+  selectedDatasetIds?: readonly string[],
 ) {
-  for (const dataset of datasets) {
+  const highlighted = new Set<string>()
+  if (selectedDatasetIds?.length) {
+    for (const id of selectedDatasetIds) highlighted.add(id)
+  } else if (activeDatasetId) {
+    highlighted.add(activeDatasetId)
+  }
+  const ordered = highlighted.size
+    ? [
+        ...datasets.filter((dataset) => !highlighted.has(dataset.id)),
+        ...datasets.filter((dataset) => highlighted.has(dataset.id)),
+      ]
+    : datasets
+  for (const dataset of ordered) {
     context.save()
-    const active = !activeDatasetId || dataset.id === activeDatasetId
+    const active = !highlighted.size || highlighted.has(dataset.id)
     context.globalAlpha = active ? 1 : 0.32
     context.fillStyle = dataset.color
     if (dataset.points.length > 1) {
