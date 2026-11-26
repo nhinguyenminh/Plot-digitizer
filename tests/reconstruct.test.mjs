@@ -379,3 +379,45 @@ test('keeps estimated bridges and short paths unchanged when rendering', () => {
     else globalThis.document = previous
   }
 })
+
+test('releases plot-region clip before replaying manual draw and erase corrections', () => {
+  const previous = globalThis.document
+  const events = []
+  let layer = 0
+  globalThis.document = { createElement: () => {
+    const id = layer++
+    const context = {
+      fillRect() {}, save() {}, beginPath() {}, rect() {}, drawImage() {}, moveTo() {}, lineTo() {}, arc() {}, fill() {},
+      clip() { events.push({ layer: id, action: 'clip' }) },
+      restore() { events.push({ layer: id, action: 'restore' }) },
+      stroke() { events.push({ layer: id, action: 'stroke', op: this.globalCompositeOperation }) },
+    }
+    return { getContext: () => context, toDataURL: () => 'image' }
+  } }
+  try {
+    renderReconstruction(
+      {
+        width: 100, height: 100,
+        region: { x: 20, y: 20, width: 60, height: 60 },
+        horizontal: [30], vertical: [30],
+        curves: [[{ x: 25, y: 25 }, { x: 50, y: 50 }]],
+        learnedCorrections: [{ points: [{ x: 30, y: 30 }, { x: 40, y: 40 }], erase: false, layer: 'curve' }],
+      },
+      [
+        { points: [{ x: 5, y: 5 }, { x: 15, y: 15 }], erase: false, layer: 'curve' },
+        { points: [{ x: 5, y: 5 }, { x: 15, y: 15 }], erase: true, layer: 'grid' },
+      ],
+      { curve: '#0066ff', grid: '#000000', axis: '#000000' },
+      { curve: 1, grid: 1 },
+    )
+    const curveEvents = events.filter((e) => e.layer === 2).map((e) => e.action)
+    const gridEvents = events.filter((e) => e.layer === 1).map((e) => e.action)
+    // Curve layer: clip -> detected curve -> learned correction -> restore -> manual draw (unclipped)
+    assert.deepEqual(curveEvents, ['clip', 'stroke', 'stroke', 'restore', 'stroke'])
+    // Grid layer: clip -> horizontal -> vertical -> restore -> manual erase (unclipped)
+    assert.deepEqual(gridEvents, ['clip', 'stroke', 'stroke', 'restore', 'stroke'])
+  } finally {
+    if (previous === undefined) delete globalThis.document
+    else globalThis.document = previous
+  }
+})

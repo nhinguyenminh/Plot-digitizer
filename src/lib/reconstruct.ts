@@ -70,19 +70,35 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     const span = horizontal ? w : h
     const rowNeutral = new Uint32Array(length)
     const rowTinted = new Uint8Array(length)
-    const candidates: { position: number; start: number; end: number; strength: number }[] = []
+    const solidCandidates: { position: number; start: number; end: number; strength: number }[] = []
+    const dashedCandidates: { position: number; start: number; end: number; strength: number }[] = []
     const tintedCandidates: { position: number; start: number; end: number; strength: number }[] = []
-    let start = -1; let weighted = 0; let total = 0
+    let solidStart = -1; let solidWeighted = 0; let solidTotal = 0
+    let dashedStart = -1; let dashedWeighted = 0; let dashedTotal = 0
     let tintedStart = -1; let tintedWeighted = 0; let tintedTotal = 0
+
+    const hasInkAtOffset = (pTarget: number, qCenter: number) => {
+      if (pTarget < 0 || pTarget >= length) return false
+      const qMin = Math.max(0, qCenter - 2)
+      const qMax = Math.min(span - 1, qCenter + 2)
+      for (let q = qMin; q <= qMax; q++) {
+        const idx = horizontal ? pTarget * w + q : q * w + pTarget
+        if (ink[idx]) return true
+      }
+      return false
+    }
+
     for (let p = 0; p <= length; p++) {
       let score = 0
       let neutralCount = 0
       let rawCount = 0
-      let firstNeutral = -1
-      let lastNeutral = -1
-      let neutralRuns = 0
-      let currentRun = 0
-      let maxNeutralRun = 0
+      let isolatedCount = 0
+      let firstIsolated = -1
+      let lastIsolated = -1
+      let isolatedRuns = 0
+      let currentIsoRun = 0
+      let maxIsoRun = 0
+      let quintileMask = 0
       if (p < length) {
         for (let q = 0; q < span; q++) {
           const idx = horizontal ? p * w + q : q * w + p
@@ -90,37 +106,59 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
             rawCount++
             if (coloredCurve[idx]) {
               score += 0.15
-              if (currentRun > 0) { maxNeutralRun = Math.max(maxNeutralRun, currentRun); currentRun = 0 }
+              if (currentIsoRun > 0) { maxIsoRun = Math.max(maxIsoRun, currentIsoRun); currentIsoRun = 0 }
             } else {
               score += 1
               neutralCount++
-              if (firstNeutral < 0) firstNeutral = q
-              lastNeutral = q
-              if (currentRun === 0) neutralRuns++
-              currentRun++
+              // A pixel belonging to a thin dashed gridline has empty space on at least one perpendicular side (±2px),
+              // whereas curves crossing this line perpendicularly continue on both sides.
+              const crossesPerpendicular = hasInkAtOffset(p - 2, q) && hasInkAtOffset(p + 2, q)
+              if (!crossesPerpendicular) {
+                isolatedCount++
+                if (firstIsolated < 0) firstIsolated = q
+                lastIsolated = q
+                if (currentIsoRun === 0) isolatedRuns++
+                currentIsoRun++
+                quintileMask |= 1 << Math.min(4, Math.floor((q * 5) / span))
+              } else if (currentIsoRun > 0) {
+                maxIsoRun = Math.max(maxIsoRun, currentIsoRun)
+                currentIsoRun = 0
+              }
             }
-          } else if (currentRun > 0) {
-            maxNeutralRun = Math.max(maxNeutralRun, currentRun)
-            currentRun = 0
+          } else if (currentIsoRun > 0) {
+            maxIsoRun = Math.max(maxIsoRun, currentIsoRun)
+            currentIsoRun = 0
           }
         }
-        if (currentRun > 0) maxNeutralRun = Math.max(maxNeutralRun, currentRun)
+        if (currentIsoRun > 0) maxIsoRun = Math.max(maxIsoRun, currentIsoRun)
         rowNeutral[p] = neutralCount
       }
+      const quintilesCovered = ((quintileMask & 1) ? 1 : 0) + ((quintileMask & 2) ? 1 : 0)
+        + ((quintileMask & 4) ? 1 : 0) + ((quintileMask & 8) ? 1 : 0) + ((quintileMask & 16) ? 1 : 0)
+
       const isSolidLine = score >= span * 0.35
+      if (isSolidLine) {
+        if (solidStart < 0) solidStart = p
+        solidWeighted += p * score; solidTotal += score
+      } else if (solidStart >= 0) {
+        solidCandidates.push({ position: Math.round(solidWeighted / solidTotal), start: solidStart, end: p - 1, strength: solidTotal })
+        solidStart = -1; solidWeighted = 0; solidTotal = 0
+      }
+
       const isDashedLine = !isSolidLine
-        && neutralRuns >= 4
-        && firstNeutral >= 0
-        && (lastNeutral - firstNeutral + 1) >= span * 0.55
-        && neutralCount >= span * 0.14
-        && maxNeutralRun <= span * 0.25
-      if (isSolidLine || isDashedLine) {
-        if (start < 0) start = p
-        const weight = isSolidLine ? score : neutralCount
-        weighted += p * weight; total += weight
-      } else if (start >= 0) {
-        candidates.push({ position: Math.round(weighted / total), start, end: p - 1, strength: total })
-        start = -1; weighted = 0; total = 0
+        && isolatedRuns >= 6
+        && firstIsolated >= 0
+        && (lastIsolated - firstIsolated + 1) >= span * 0.60
+        && isolatedCount >= span * 0.16
+        && isolatedCount >= neutralCount * 0.65
+        && maxIsoRun <= span * 0.15
+        && quintilesCovered >= 4
+      if (isDashedLine) {
+        if (dashedStart < 0) dashedStart = p
+        dashedWeighted += p * isolatedCount; dashedTotal += isolatedCount
+      } else if (dashedStart >= 0) {
+        dashedCandidates.push({ position: Math.round(dashedWeighted / dashedTotal), start: dashedStart, end: p - 1, strength: dashedTotal })
+        dashedStart = -1; dashedWeighted = 0; dashedTotal = 0
       }
 
       const isTintedFullLine = !isSolidLine && !isDashedLine && rawCount >= span * 0.65
@@ -132,13 +170,20 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
         tintedStart = -1; tintedWeighted = 0; tintedTotal = 0
       }
     }
+
+    const candidates = [...solidCandidates]
+    for (const dashed of dashedCandidates) {
+      if (solidCandidates.some((solid) => Math.abs(solid.position - dashed.position) <= 6)) continue
+      candidates.push(dashed)
+    }
     if (tintedCandidates.length >= 2) {
       for (const candidate of tintedCandidates) {
+        if (candidates.some((existing) => Math.abs(existing.position - candidate.position) <= 4)) continue
         candidates.push(candidate)
         for (let position = candidate.start; position <= candidate.end; position++) rowTinted[position] = 1
       }
-      candidates.sort((a, b) => a.position - b.position)
     }
+    candidates.sort((a, b) => a.position - b.position)
     const min = horizontal ? top : left
     const max = horizontal ? bottom : right
     const valid = [...new Set(manual.filter((value) => Number.isFinite(value) && value >= min && value <= max).map(Math.round))].sort((a, b) => a - b)
@@ -147,8 +192,8 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
     const mask = new Uint8Array(length)
     for (const candidate of candidates) {
       for (let position = candidate.start; position <= candidate.end; position++) mask[position] = 1
-      if (candidate.start > 0 && rowNeutral[candidate.start - 1] >= span * 0.12) mask[candidate.start - 1] = 1
-      if (candidate.end + 1 < length && rowNeutral[candidate.end + 1] >= span * 0.12) mask[candidate.end + 1] = 1
+      if (candidate.start > 0 && rowNeutral[candidate.start - 1] >= span * 0.25) mask[candidate.start - 1] = 1
+      if (candidate.end + 1 < length && rowNeutral[candidate.end + 1] >= span * 0.25) mask[candidate.end + 1] = 1
     }
     for (const line of valid) mask[line - min] = 1
     if (axis !== null) mask[Math.round(axis) - min] = 1
@@ -179,8 +224,8 @@ export function detectReconstruction(image: ImageData, region: PlotRegion, guide
       const local = Math.round(line) - min
       if (local >= 0 && local < length) {
         mask[local] = 1
-        if (local > 0 && rowNeutral[local - 1] >= span * 0.12) mask[local - 1] = 1
-        if (local + 1 < length && rowNeutral[local + 1] >= span * 0.12) mask[local + 1] = 1
+        if (local > 0 && rowNeutral[local - 1] >= span * 0.25) mask[local - 1] = 1
+        if (local + 1 < length && rowNeutral[local + 1] >= span * 0.25) mask[local + 1] = 1
       }
     }
     let inferredAxis = horizontal ? lines[lines.length - 1] : lines[0]
@@ -497,8 +542,8 @@ function renderReconstructionLayers(geometry: Reconstruction, corrections: Corre
     for (const point of points.slice(1)) curveContext.lineTo(point.x, point.y)
     curveContext.stroke()
   }
-  for (const correction of [...(geometry.learnedCorrections ?? []), ...corrections]) {
-    if (!correction.points.length || (!correction.erase && correction.points.length < 2)) continue
+  const drawCorrection = (correction: Correction) => {
+    if (!correction.points.length || (!correction.erase && correction.points.length < 2)) return
     const targets = correction.layer === 'grid' ? [grid] : correction.layer === 'curve' || !correction.erase ? [curve] : [grid, curve]
     for (const target of targets) {
       const ctx = target.context
@@ -516,7 +561,10 @@ function renderReconstructionLayers(geometry: Reconstruction, corrections: Corre
       }
     }
   }
+  for (const correction of geometry.learnedCorrections ?? []) drawCorrection(correction)
+  // Release plot-region clipping after processed/learned geometry so manual draw and erase work across the full canvas.
   gridContext.restore(); curveContext.restore()
+  for (const correction of corrections) drawCorrection(correction)
   return { grid: grid.canvas, curve: curve.canvas }
 }
 

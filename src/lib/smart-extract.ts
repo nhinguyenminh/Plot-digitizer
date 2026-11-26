@@ -311,11 +311,12 @@ export function smartExtractCurvesFromLayer(
 
   if (mask && mask.length !== data.length) throw new Error('Selection mask does not match image dimensions.')
 
-  // 1. Build clean binary ink map (optionally clipped to plotRegion)
-  const regionLeft = plotRegion ? Math.max(0, Math.floor(plotRegion.x)) : 0
-  const regionTop = plotRegion ? Math.max(0, Math.floor(plotRegion.y)) : 0
-  const regionRight = plotRegion ? Math.min(width - 1, Math.ceil(plotRegion.x + plotRegion.width)) : width - 1
-  const regionBottom = plotRegion ? Math.min(height - 1, Math.ceil(plotRegion.y + plotRegion.height)) : height - 1
+  // 1. Build clean binary ink map (clip to plotRegion only for non-isolated raw scans so manual edits outside the region are preserved)
+  const clipToRegion = Boolean(plotRegion && mode !== 'isolated')
+  const regionLeft = clipToRegion && plotRegion ? Math.max(0, Math.floor(plotRegion.x)) : 0
+  const regionTop = clipToRegion && plotRegion ? Math.max(0, Math.floor(plotRegion.y)) : 0
+  const regionRight = clipToRegion && plotRegion ? Math.min(width - 1, Math.ceil(plotRegion.x + plotRegion.width)) : width - 1
+  const regionBottom = clipToRegion && plotRegion ? Math.min(height - 1, Math.ceil(plotRegion.y + plotRegion.height)) : height - 1
 
   const ink = new Uint8Array(width * height)
   const coloredInk = new Uint8Array(width * height)
@@ -363,59 +364,102 @@ export function smartExtractCurvesFromLayer(
       const span = horizontal ? boxW : boxH
       const maskLine = new Uint8Array(horizontal ? height : width)
       const neutralByP = new Uint32Array(horizontal ? height : width)
-      const detected: number[] = []
-      let runStart = -1, weighted = 0, total = 0
+      const solidLines: { center: number; start: number; end: number }[] = []
+      const dashedLines: { center: number; start: number; end: number }[] = []
+      let solidStart = -1, solidWeighted = 0, solidTotal = 0
+      let dashedStart = -1, dashedWeighted = 0, dashedTotal = 0
+
+      const hasInkAtOffset = (pTarget: number, qCenter: number) => {
+        if (pTarget < pStart || pTarget > pEnd) return false
+        const qMin = Math.max(qStart, qCenter - 2)
+        const qMax = Math.min(qEnd, qCenter + 2)
+        for (let q = qMin; q <= qMax; q++) {
+          const idx = horizontal ? pTarget * width + q : q * width + pTarget
+          if (ink[idx]) return true
+        }
+        return false
+      }
 
       for (let p = pStart; p <= pEnd + 1; p++) {
-        let score = 0, neutralCount = 0, firstNeutral = -1, lastNeutral = -1, runs = 0, curRun = 0, maxRun = 0
+        let score = 0, neutralCount = 0, isolatedCount = 0, firstIsolated = -1, lastIsolated = -1, isolatedRuns = 0, curIsoRun = 0, maxIsoRun = 0, quintileMask = 0
         if (p <= pEnd) {
           for (let q = qStart; q <= qEnd; q++) {
             const idx = horizontal ? p * width + q : q * width + p
             if (ink[idx]) {
               if (coloredInk[idx]) {
                 score += 0.15
-                if (curRun > 0) { maxRun = Math.max(maxRun, curRun); curRun = 0 }
+                if (curIsoRun > 0) { maxIsoRun = Math.max(maxIsoRun, curIsoRun); curIsoRun = 0 }
               } else {
                 score += 1
                 neutralCount++
-                if (firstNeutral < 0) firstNeutral = q
-                lastNeutral = q
-                if (curRun === 0) runs++
-                curRun++
+                const crossesPerpendicular = hasInkAtOffset(p - 2, q) && hasInkAtOffset(p + 2, q)
+                if (!crossesPerpendicular) {
+                  isolatedCount++
+                  if (firstIsolated < 0) firstIsolated = q
+                  lastIsolated = q
+                  if (curIsoRun === 0) isolatedRuns++
+                  curIsoRun++
+                  quintileMask |= 1 << Math.min(4, Math.floor(((q - qStart) * 5) / span))
+                } else if (curIsoRun > 0) {
+                  maxIsoRun = Math.max(maxIsoRun, curIsoRun)
+                  curIsoRun = 0
+                }
               }
-            } else if (curRun > 0) {
-              maxRun = Math.max(maxRun, curRun)
-              curRun = 0
+            } else if (curIsoRun > 0) {
+              maxIsoRun = Math.max(maxIsoRun, curIsoRun)
+              curIsoRun = 0
             }
           }
-          if (curRun > 0) maxRun = Math.max(maxRun, curRun)
+          if (curIsoRun > 0) maxIsoRun = Math.max(maxIsoRun, curIsoRun)
           neutralByP[p] = neutralCount
         }
+        const quintilesCovered = ((quintileMask & 1) ? 1 : 0) + ((quintileMask & 2) ? 1 : 0)
+          + ((quintileMask & 4) ? 1 : 0) + ((quintileMask & 8) ? 1 : 0) + ((quintileMask & 16) ? 1 : 0)
+
         const solid = score >= span * 0.35
-        const dashed = !solid && runs >= 4 && firstNeutral >= 0
-          && (lastNeutral - firstNeutral + 1) >= span * 0.55
-          && neutralCount >= span * 0.14
-          && maxRun <= span * 0.25
-        if (solid || dashed) {
-          if (runStart < 0) runStart = p
-          const weight = solid ? score : neutralCount
-          weighted += p * weight; total += weight
-        } else if (runStart >= 0) {
-          const center = Math.round(weighted / total)
-          detected.push(center)
-          for (let pos = runStart; pos <= p - 1; pos++) maskLine[pos] = 1
-          if (runStart > pStart && neutralByP[runStart - 1] >= span * 0.12) maskLine[runStart - 1] = 1
-          if (p <= pEnd && neutralByP[p] >= span * 0.12) maskLine[p] = 1
-          runStart = -1; weighted = 0; total = 0
+        if (solid) {
+          if (solidStart < 0) solidStart = p
+          solidWeighted += p * score; solidTotal += score
+        } else if (solidStart >= 0) {
+          solidLines.push({ center: Math.round(solidWeighted / solidTotal), start: solidStart, end: p - 1 })
+          solidStart = -1; solidWeighted = 0; solidTotal = 0
         }
+
+        const dashed = !solid
+          && isolatedRuns >= 6
+          && firstIsolated >= 0
+          && (lastIsolated - firstIsolated + 1) >= span * 0.60
+          && isolatedCount >= span * 0.16
+          && isolatedCount >= neutralCount * 0.65
+          && maxIsoRun <= span * 0.15
+          && quintilesCovered >= 4
+        if (dashed) {
+          if (dashedStart < 0) dashedStart = p
+          dashedWeighted += p * isolatedCount; dashedTotal += isolatedCount
+        } else if (dashedStart >= 0) {
+          dashedLines.push({ center: Math.round(dashedWeighted / dashedTotal), start: dashedStart, end: p - 1 })
+          dashedStart = -1; dashedWeighted = 0; dashedTotal = 0
+        }
+      }
+
+      const detected: number[] = []
+      const accepted = [
+        ...solidLines,
+        ...dashedLines.filter((d) => !solidLines.some((s) => Math.abs(s.center - d.center) <= 6)),
+      ]
+      for (const line of accepted) {
+        detected.push(line.center)
+        for (let pos = line.start; pos <= line.end; pos++) maskLine[pos] = 1
+        if (line.start > pStart && neutralByP[line.start - 1] >= span * 0.25) maskLine[line.start - 1] = 1
+        if (line.end < pEnd && neutralByP[line.end + 1] >= span * 0.25) maskLine[line.end + 1] = 1
       }
       const existing = horizontal ? horizontalGrid : verticalGrid
       for (const line of existing) {
         const pos = Math.round(line)
         if (pos >= 0 && pos < maskLine.length) {
           maskLine[pos] = 1
-          if (pos > 0 && neutralByP[pos - 1] >= span * 0.12) maskLine[pos - 1] = 1
-          if (pos + 1 < maskLine.length && neutralByP[pos + 1] >= span * 0.12) maskLine[pos + 1] = 1
+          if (pos > 0 && neutralByP[pos - 1] >= span * 0.25) maskLine[pos - 1] = 1
+          if (pos + 1 < maskLine.length && neutralByP[pos + 1] >= span * 0.25) maskLine[pos + 1] = 1
         }
       }
       for (const pos of detected) {

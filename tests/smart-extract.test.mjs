@@ -190,3 +190,24 @@ test('detectReconstruction strips dashed and tinted gridlines while keeping real
   assert.ok(!curvePts.some((pt) => Math.abs(pt.y - 40) <= 1 && pt.x < 60), 'dashed gridline away from curve should not remain as curve')
   assert.ok(!curvePts.some((pt) => Math.abs(pt.x - 50) <= 1 && pt.y < 55), 'tinted vertical gridline away from curve should not remain as curve')
 })
+
+test('detectReconstruction never invents vertical gridlines across stacked compressor speed curves', () => {
+  const plot = createRgba(300, 180, [255, 255, 255, 255])
+  // True solid gridlines: 5 horizontal, 4 vertical
+  for (const y of [20, 60, 100, 140, 165]) drawStroke(plot, 20, y, 280, y, [30, 30, 30, 255], 1)
+  for (const x of [20, 100, 190, 280]) drawStroke(plot, x, 20, x, 165, [30, 30, 30, 255], 1)
+  // 5 stacked thick dark speed curves crossing x=110..220 (plus steep surge line on left)
+  drawStroke(plot, 85, 145, 130, 35, [10, 10, 10, 255], 3)
+  for (let i = 0; i < 5; i++) {
+    const baseY = 55 + i * 22
+    for (let x = 115; x < 235; x += 4) {
+      const y0 = baseY + 0.002 * (x - 115) ** 2
+      const y1 = baseY + 0.002 * (x + 4 - 115) ** 2
+      if (y1 < 162) drawStroke(plot, x, y0, x + 4, y1, [10, 10, 10, 255], 3)
+    }
+  }
+
+  const result = detectReconstruction(plot, { x: 20, y: 20, width: 260, height: 145 }, { horizontal: [], vertical: [] })
+  assert.deepEqual(result.vertical, [20, 100, 190, 280], `expected only the 4 true vertical gridlines, got ${result.vertical}`)
+  assert.deepEqual(result.horizontal, [20, 60, 100, 140, 165], `expected only the 5 true horizontal gridlines, got ${result.horizontal}`)
+})

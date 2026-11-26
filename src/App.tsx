@@ -1156,11 +1156,6 @@ export default function App() {
       return
     }
     if (mode === 'prep-draw' || mode === 'prep-line' || mode === 'prep-erase') {
-      const bounds = reconstruction?.region
-      if (bounds && !guide.some((point) => point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height)) {
-        showNotice('Draw inside the detected plot area. Select a different area and process again if needed.', 'error')
-        return
-      }
       let points = mode === 'prep-line' ? [guide[0], guide[guide.length - 1]] : [...guide]
       if (mode !== 'prep-erase' && correctionLayer === 'curve' && snapDrawing) {
         try {
