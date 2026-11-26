@@ -4,6 +4,7 @@ import { Scissors } from 'lucide-react'
 type Props = {
   open: boolean
   sourceName: string
+  sharedPointNumber?: number
   firstCount: number
   secondCount: number
   firstColor: string
@@ -17,6 +18,7 @@ type Props = {
 export default function BreakDatasetDialog({
   open,
   sourceName,
+  sharedPointNumber,
   firstCount,
   secondCount,
   firstColor,
@@ -90,7 +92,9 @@ export default function BreakDatasetDialog({
         </div>
 
         <p className="break-description">
-          Split <strong>{sourceName}</strong> ({firstCount + secondCount} points) into two separate datasets. You can keep or customize both names below.
+          {sharedPointNumber !== undefined
+            ? <>Split <strong>{sourceName}</strong> at point <strong>#{sharedPointNumber}</strong> into two datasets (both datasets will include this point). You can keep or customize both names below.</>
+            : <>Split <strong>{sourceName}</strong> ({firstCount + secondCount} points) into two separate datasets. You can keep or customize both names below.</>}
         </p>
 
         <form

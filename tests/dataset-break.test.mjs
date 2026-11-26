@@ -1,6 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { breakDatasetAtSegment, findNearestDatasetSegment, suggestSplitDatasetName } from '../src/lib/dataset-break.ts'
+import {
+  breakDatasetAtPoint,
+  breakDatasetAtSegment,
+  findNearestBreakPoint,
+  findNearestDatasetSegment,
+  suggestSplitDatasetName,
+} from '../src/lib/dataset-break.ts'
 
 const sampleDataset = {
   id: 'ds-1',
@@ -75,4 +81,39 @@ test('suggests unique default split names and rejects invalid break indices', ()
   assert.equal(suggestSplitDatasetName('Curve 1', existing), 'Curve 1 (3)')
   assert.throws(() => breakDatasetAtSegment({ ...sampleDataset, points: [{ x: 0, y: 0 }] }, 0, { secondColor: '#ffffff' }), /at least two points/)
   assert.throws(() => breakDatasetAtSegment(sampleDataset, 3, { secondColor: '#ffffff' }), /valid segment/)
+})
+
+test('finds nearest interior break point while ignoring first and last endpoints', () => {
+  // Click near first endpoint (10, 100) should NOT match
+  assert.equal(findNearestBreakPoint([sampleDataset], { x: 11, y: 100 }, 12), null)
+  // Click near last endpoint (130, 40) should NOT match
+  assert.equal(findNearestBreakPoint([sampleDataset], { x: 129, y: 40 }, 12), null)
+  // Click near interior point index 1 (50, 80) matches
+  const hit = findNearestBreakPoint([sampleDataset], { x: 52, y: 79 }, 12)
+  assert.ok(hit)
+  assert.equal(hit.datasetId, 'ds-1')
+  assert.equal(hit.pointIndex, 1)
+  assert.deepEqual(hit.point, { x: 50, y: 80 })
+})
+
+test('breaks a dataset at a chosen point so both resulting datasets include that point', () => {
+  const [first, second] = breakDatasetAtPoint(sampleDataset, 2, {
+    firstName: 'Segment A',
+    secondName: 'Segment B',
+    secondColor: '#fb7185',
+    secondId: 'ds-1-b',
+  })
+  assert.equal(first.name, 'Segment A')
+  assert.equal(second.name, 'Segment B')
+  assert.deepEqual(first.points, [{ x: 10, y: 100 }, { x: 50, y: 80 }, { x: 90, y: 60 }])
+  assert.deepEqual(second.points, [{ x: 90, y: 60 }, { x: 130, y: 40 }])
+
+  // Shared point must be cloned independently so mutating one dataset does not affect the other
+  first.points[2].x = 777
+  assert.equal(second.points[0].x, 90)
+
+  // Endpoints and <3 point datasets are rejected
+  assert.throws(() => breakDatasetAtPoint(sampleDataset, 0, { secondColor: '#ffffff' }), /interior point/)
+  assert.throws(() => breakDatasetAtPoint(sampleDataset, 3, { secondColor: '#ffffff' }), /interior point/)
+  assert.throws(() => breakDatasetAtPoint({ ...sampleDataset, points: [{ x: 0, y: 0 }, { x: 10, y: 10 }] }, 1, { secondColor: '#ffffff' }), /at least three points/)
 })

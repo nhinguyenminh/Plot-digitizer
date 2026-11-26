@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { pointToData } from '../lib/digitizer'
-import { findNearestDatasetSegment } from '../lib/dataset-break'
+import { findNearestBreakPoint, findNearestDatasetSegment } from '../lib/dataset-break'
+import type { DatasetBreakMode } from '../lib/dataset-break'
 import { drawDatasets } from '../lib/dataset-render'
 import { BRUSH_GROUPS, createBrushMask } from '../lib/painted-region'
 import type { BrushMark } from '../lib/painted-region'
@@ -39,6 +40,8 @@ interface Props {
   onDeletePoint: (point: PixelPoint) => void
   canDeletePoint: boolean
   onDeleteSelectedPoint: (datasetId: string, index: number) => void
+  breakDatasetMode?: DatasetBreakMode
+  onBreakDatasetPoint?: (datasetId: string, pointIndex: number) => void
   onBreakDatasetSegment?: (datasetId: string, segmentIndex: number) => void
   readOnly: boolean
   calibrationMarkers: CalibrationMarker[]
@@ -76,7 +79,7 @@ const formatCoordinate = (value: number, scale: ScaleType) => scale === 'date'
   ? new Date(value).toISOString().replace('T', ' ').replace('.000Z', 'Z')
   : Number(value.toPrecision(5)).toString()
 
-export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, selectedPointHint, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, onBreakDatasetSegment, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onPointMoveEnd, onMoveCalibrationPoint, onTraceRegion }: Props) {
+export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl, onImageError, imageLabel, imageName, onSaveError, showBackground, datasets, activeDatasetId, selectionVersion, selectedPointHint, onSelectDataset, mode, gridGuides, axisGuides, plotRegion, onCanvasClick, onDeletePoint, canDeletePoint, onDeleteSelectedPoint, breakDatasetMode = 'point', onBreakDatasetPoint, onBreakDatasetSegment, readOnly, calibrationMarkers, calibrationMarkerColor, pointMarkerSize, showCalibrationMarkers, xAxis, yAxis, coordinateLabels, coordinateScales, traceBrushWidth, brushGroup, eraserWidth, brushMarks, brushErasing, curveColor, correctionColor, correctionWidth, healMark, healBrushWidth, healPreview, onApplyHealing, onHealChoiceChange, onSeedColor, onCropSelection, onRegionSelection, onStraighten, onMovePoint, onPointMoveEnd, onMoveCalibrationPoint, onTraceRegion }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -105,14 +108,23 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
   const [traceStroke, setTraceStroke] = useState<PixelPoint[]>([])
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; point: PixelPoint } | null>(null)
   const breakHitRadius = Math.max(14, dimensions.width / 80)
+  const breakPointHitRadius = Math.max(18, Math.max(3, dimensions.width / 260) * pointMarkerSize / 100 + 8)
+  const hoveredBreakPoint = useMemo(() => {
+    if (mode !== 'break-dataset' || breakDatasetMode !== 'point' || !cursor || readOnly || !dimensions.width) return null
+    return findNearestBreakPoint(datasets, cursor, breakPointHitRadius, activeDatasetId)
+  }, [mode, breakDatasetMode, cursor, readOnly, dimensions.width, datasets, breakPointHitRadius, activeDatasetId])
   const hoveredBreakSegment = useMemo(() => {
-    if (mode !== 'break-dataset' || !cursor || readOnly || !dimensions.width) return null
+    if (mode !== 'break-dataset' || breakDatasetMode !== 'segment' || !cursor || readOnly || !dimensions.width) return null
     return findNearestDatasetSegment(datasets, cursor, breakHitRadius, activeDatasetId)
-  }, [mode, cursor, readOnly, dimensions.width, datasets, breakHitRadius, activeDatasetId])
+  }, [mode, breakDatasetMode, cursor, readOnly, dimensions.width, datasets, breakHitRadius, activeDatasetId])
+  const contextBreakPointHit = useMemo(() => {
+    if (!contextMenu || breakDatasetMode !== 'point' || !canDeletePoint || readOnly || !dimensions.width) return null
+    return findNearestBreakPoint(datasets, contextMenu.point, Math.max(20, breakPointHitRadius), activeDatasetId)
+  }, [contextMenu, breakDatasetMode, canDeletePoint, readOnly, dimensions.width, datasets, breakPointHitRadius, activeDatasetId])
   const contextBreakHit = useMemo(() => {
-    if (!contextMenu || !canDeletePoint || readOnly || !dimensions.width) return null
+    if (!contextMenu || breakDatasetMode !== 'segment' || !canDeletePoint || readOnly || !dimensions.width) return null
     return findNearestDatasetSegment(datasets, contextMenu.point, Math.max(16, dimensions.width / 70), activeDatasetId)
-  }, [contextMenu, canDeletePoint, readOnly, dimensions.width, datasets, activeDatasetId])
+  }, [contextMenu, breakDatasetMode, canDeletePoint, readOnly, dimensions.width, datasets, activeDatasetId])
   const previewWidth = mode === 'prep-erase' ? eraserWidth : mode === 'prep-heal' ? healBrushWidth : traceBrushWidth
   const fitScale = dimensions.width && dimensions.height && viewport.width && viewport.height
     ? Math.min(1, viewport.width / dimensions.width, viewport.height / dimensions.height)
@@ -209,6 +221,26 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillRect(0, 0, image.naturalWidth, image.naturalHeight)
     }
     drawDatasets(context, datasets, (point) => point, Math.max(2, image.width / 700), Math.max(3, image.width / 260) * pointMarkerSize / 100, activeDatasetId)
+    if (hoveredBreakPoint) {
+      const { point } = hoveredBreakPoint
+      const outerRadius = Math.max(3, image.width / 260) * pointMarkerSize / 100 + 7
+      context.save()
+      context.beginPath()
+      context.arc(point.x, point.y, outerRadius, 0, Math.PI * 2)
+      context.fillStyle = 'rgba(251, 113, 133, 0.22)'
+      context.fill()
+      context.strokeStyle = '#fb7185'
+      context.lineWidth = Math.max(2.5, image.width / 520)
+      context.setLineDash([4, 3])
+      context.stroke()
+      context.setLineDash([])
+      context.beginPath()
+      context.arc(point.x, point.y, Math.max(3, outerRadius * 0.42), 0, Math.PI * 2)
+      context.strokeStyle = '#ffffff'
+      context.lineWidth = Math.max(1.5, image.width / 850)
+      context.stroke()
+      context.restore()
+    }
     if (hoveredBreakSegment) {
       const { start, end, closest } = hoveredBreakSegment
       const markerRadius = Math.max(5, image.width / 170)
@@ -292,7 +324,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
       context.fillText(`${axis.toUpperCase()}${index + 1}`, labelRect.x + 4, labelRect.y + labelHeight / 2 + fontSize * 0.35)
     })
     context.restore()
-  }, [datasets, activeDatasetId, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground, hoveredBreakSegment])
+  }, [datasets, activeDatasetId, calibrationMarkers, selectedPoint, selectedCalibration, calibrationMarkerColor, pointMarkerSize, showBackground, hoveredBreakPoint, hoveredBreakSegment])
 
   useEffect(() => {
     if (!imageUrl) { imageRef.current = null; displayImageRef.current = null; sourceCanvasRef.current = null; setDimensions({ width: 0, height: 0 }); return }
@@ -346,6 +378,21 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     const mapX = (x: number) => (x - sourceLeft) * lensCanvas.width / sourceSize
     const mapY = (y: number) => (y - sourceTop) * lensCanvas.height / sourceSize
     drawDatasets(context, datasets, (point) => ({ x: mapX(point.x), y: mapY(point.y) }), 2, 2.5 * pointMarkerSize / 100, activeDatasetId)
+    if (hoveredBreakPoint) {
+      const px = mapX(hoveredBreakPoint.point.x)
+      const py = mapY(hoveredBreakPoint.point.y)
+      context.save()
+      context.beginPath()
+      context.arc(px, py, 2.5 * pointMarkerSize / 100 + 6, 0, Math.PI * 2)
+      context.fillStyle = 'rgba(251, 113, 133, 0.25)'
+      context.fill()
+      context.strokeStyle = '#fb7185'
+      context.lineWidth = 2
+      context.setLineDash([4, 2])
+      context.stroke()
+      context.setLineDash([])
+      context.restore()
+    }
     if (hoveredBreakSegment) {
       const { start, end, closest } = hoveredBreakSegment
       context.save()
@@ -450,7 +497,7 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     context.moveTo(0, lensCanvas.height / 2)
     context.lineTo(lensCanvas.width, lensCanvas.height / 2)
     context.stroke()
-  }, [cursor, datasets, activeDatasetId, selectedPoint, hoveredBreakSegment, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
+  }, [cursor, datasets, activeDatasetId, selectedPoint, hoveredBreakPoint, hoveredBreakSegment, calibrationMarkers, showCalibrationMarkers, selectedCalibration, calibrationMarkerColor, pointMarkerSize, dimensions, imageUrl, displayImageUrl, mode, eraserWidth, lensSourceSize, traceStroke, brushOverlay, brushErasing, brushColor, brushGroup, previewWidth, correctionColor, correctionWidth, healPreview, cropStart, cropCursor])
 
   const toImagePoint = (event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>) => {
     const canvas = canvasRef.current!
@@ -469,8 +516,14 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
     if (suppressClickRef.current) { suppressClickRef.current = false; return }
     if (mode === 'break-dataset') {
       event.currentTarget.focus()
-      const hit = findNearestDatasetSegment(datasets, toImagePoint(event), breakHitRadius, activeDatasetId)
-      if (hit) onBreakDatasetSegment?.(hit.datasetId, hit.segmentIndex)
+      const point = toImagePoint(event)
+      if (breakDatasetMode === 'point') {
+        const hit = findNearestBreakPoint(datasets, point, breakPointHitRadius, activeDatasetId)
+        if (hit) onBreakDatasetPoint?.(hit.datasetId, hit.pointIndex)
+      } else {
+        const hit = findNearestDatasetSegment(datasets, point, breakHitRadius, activeDatasetId)
+        if (hit) onBreakDatasetSegment?.(hit.datasetId, hit.segmentIndex)
+      }
       return
     }
     if (mode === 'calibrate-edit' || mode === 'point-edit' || mode === 'select' || mode === 'prep-straighten') return
@@ -739,7 +792,11 @@ export default function PlotCanvas({ imageUrl, imageDisplayMode, displayImageUrl
         {contextMenu && <div className="canvas-context-menu" role="menu" style={{ position: 'fixed', left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
           <button role="menuitem" onClick={saveCanvas}>Save canvas as PNG</button>
           <button role="menuitem" disabled={!canDeletePoint || readOnly || !activeDataset?.points.some((point) => Math.hypot(point.x - contextMenu.point.x, point.y - contextMenu.point.y) < 24)} onClick={() => { onDeletePoint(contextMenu.point); setSelectedPoint(null); setContextMenu(null) }}>Delete nearby point</button>
-          <button role="menuitem" disabled={!contextBreakHit} onClick={() => { if (contextBreakHit) onBreakDatasetSegment?.(contextBreakHit.datasetId, contextBreakHit.segmentIndex); setContextMenu(null) }}>Break dataset here</button>
+          <button role="menuitem" disabled={breakDatasetMode === 'point' ? !contextBreakPointHit : !contextBreakHit} onClick={() => {
+            if (breakDatasetMode === 'point' && contextBreakPointHit) onBreakDatasetPoint?.(contextBreakPointHit.datasetId, contextBreakPointHit.pointIndex)
+            else if (breakDatasetMode === 'segment' && contextBreakHit) onBreakDatasetSegment?.(contextBreakHit.datasetId, contextBreakHit.segmentIndex)
+            setContextMenu(null)
+          }}>{breakDatasetMode === 'point' ? 'Break dataset at point' : 'Break dataset here'}</button>
         </div>}
         <div className="canvas-footer">
           <span className="coordinate-readout"><span className="readout-crosshair">⌖</span> {cursorText}</span>

@@ -11,7 +11,8 @@ import CloudProjects from './components/CloudProjects'
 import DeleteProjectDialog from './components/DeleteProjectDialog'
 import BreakDatasetDialog from './components/BreakDatasetDialog'
 import type { CloudProjectRow } from './lib/cloud-projects'
-import { breakDatasetAtSegment, suggestSplitDatasetName } from './lib/dataset-break'
+import { breakDatasetAtPoint, breakDatasetAtSegment, suggestSplitDatasetName } from './lib/dataset-break'
+import type { DatasetBreakMode } from './lib/dataset-break'
 import type { RotationPreview } from './components/DeskewPanel'
 import { detectPlotAxes, detectPlotGrid } from './lib/image-processing'
 import type { DetectedAxes, DetectedPlotGrid, GridGuides } from './lib/image-processing'
@@ -287,7 +288,8 @@ export default function App() {
   const [deleteProjectOpen, setDeleteProjectOpen] = useState(false)
   const [deletingProject, setDeletingProject] = useState(false)
   const [deleteProjectError, setDeleteProjectError] = useState('')
-  const [breakCandidate, setBreakCandidate] = useState<{ datasetId: string; segmentIndex: number; secondColor: string } | null>(null)
+  const [breakDatasetMode, setBreakDatasetMode] = useState<DatasetBreakMode>('point')
+  const [breakCandidate, setBreakCandidate] = useState<{ datasetId: string; kind: DatasetBreakMode; index: number; secondColor: string } | null>(null)
   const [historyAvailability, setHistoryAvailability] = useState({ undo: false, redo: false })
   const imageInput = useRef<HTMLInputElement>(null)
   const projectInput = useRef<HTMLInputElement>(null)
@@ -1781,13 +1783,26 @@ export default function App() {
     setPointSelectionVersion((version) => version + 1)
   }
 
+  const handleBreakDatasetPoint = (datasetId: string, pointIndex: number) => {
+    if (projectBusy || pendingTrace) return
+    const dataset = datasets.find((item) => item.id === datasetId)
+    if (!dataset || dataset.points.length < 3 || pointIndex < 1 || pointIndex > dataset.points.length - 2) return
+    setBreakCandidate({
+      datasetId,
+      kind: 'point',
+      index: pointIndex,
+      secondColor: nextDatasetColor(datasets.length + 1, datasets),
+    })
+  }
+
   const handleBreakDatasetSegment = (datasetId: string, segmentIndex: number) => {
     if (projectBusy || pendingTrace) return
     const dataset = datasets.find((item) => item.id === datasetId)
     if (!dataset || dataset.points.length < 2 || segmentIndex < 0 || segmentIndex >= dataset.points.length - 1) return
     setBreakCandidate({
       datasetId,
-      segmentIndex,
+      kind: 'segment',
+      index: segmentIndex,
       secondColor: nextDatasetColor(datasets.length + 1, datasets),
     })
   }
@@ -1798,11 +1813,17 @@ export default function App() {
     const target = targetIndex >= 0 ? datasets[targetIndex] : null
     if (!target) { setBreakCandidate(null); return }
     try {
-      const [first, second] = breakDatasetAtSegment(target, breakCandidate.segmentIndex, {
-        firstName,
-        secondName,
-        secondColor: breakCandidate.secondColor,
-      })
+      const [first, second] = breakCandidate.kind === 'point'
+        ? breakDatasetAtPoint(target, breakCandidate.index, {
+            firstName,
+            secondName,
+            secondColor: breakCandidate.secondColor,
+          })
+        : breakDatasetAtSegment(target, breakCandidate.index, {
+            firstName,
+            secondName,
+            secondColor: breakCandidate.secondColor,
+          })
       delete pointTrainingBaselines.current[target.id]
       if (brushTraceIds.current.includes(target.id)) {
         brushTraceIds.current = [...brushTraceIds.current, second.id]
@@ -2513,7 +2534,7 @@ export default function App() {
             <button className={`tool-button ${mode === 'trace-region' ? 'selected' : ''}`} onClick={() => setMode('trace-region')} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Paint curve region</span><kbd>A</kbd></button>
             <button className={`tool-button ${mode === 'point' ? 'selected' : ''}`} onClick={pressPointTool} disabled={!imagePrepared}><span className="tool-icon"><Crosshair size={16} /></span><span>Manual points</span><kbd>P</kbd></button>
             <button className={`tool-button ${mode === 'point-edit' ? 'selected' : ''}`} onClick={() => setMode(mode === 'point-edit' ? 'select' : 'point-edit')} disabled={!imagePrepared || !totalPoints}><span className="tool-icon"><MousePointer2 size={16} /></span><span>Modify curve points</span><kbd>M</kbd></button>
-            <button className={`tool-button ${mode === 'break-dataset' ? 'selected' : ''}`} onClick={() => setMode(mode === 'break-dataset' ? 'select' : 'break-dataset')} disabled={!imagePrepared || !datasets.some((dataset) => dataset.points.length >= 2)} title="Click the line segment between two points to split into two separate datasets"><span className="tool-icon"><Scissors size={16} /></span><span>Break dataset</span><kbd>B</kbd></button>
+            <button className={`tool-button ${mode === 'break-dataset' ? 'selected' : ''}`} onClick={() => setMode(mode === 'break-dataset' ? 'select' : 'break-dataset')} disabled={!imagePrepared || !datasets.some((dataset) => dataset.points.length >= 2)} title={breakDatasetMode === 'point' ? 'Click an interior point to split into two datasets sharing that point' : 'Click the line segment between two points to split into two separate datasets'}><span className="tool-icon"><Scissors size={16} /></span><span>Break dataset</span><kbd>B</kbd></button>
             <div className="tool-split">
               <button className="tool-button" onClick={() => { void snapPointsToCurve('selected') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => (selectedDatasetIds.length > 1 ? selectedDatasetIds.includes(dataset.id) : dataset.id === activeDataset?.id) && dataset.kind !== 'measurement' && dataset.points.length > 0)} title={`Align slightly off-curve points in the active/selected dataset onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}><span className="tool-icon"><Magnet size={16} /></span><span>Snap to curve</span></button>
               <button className="tool-sub-action" onClick={() => { void snapPointsToCurve('all') }} disabled={!imagePrepared || loading || !datasets.some((dataset) => dataset.kind !== 'measurement' && dataset.points.length > 0)} aria-label="Snap all datasets to curve" title={`Snap ALL curve datasets in this chart onto the curve centerline (radius ${Math.round(interactionModel.snapRadius)} px)`}>All</button>
@@ -2570,6 +2591,8 @@ export default function App() {
               readOnly={Boolean(pendingTrace || rotationPreview || gridDetecting)}
               onCanvasClick={(point) => { void handleCanvasClick(point) }} onDeletePoint={deleteNearestPoint} canDeletePoint={workflowStep === 'digitize'}
               onDeleteSelectedPoint={deletePointAtIndex}
+              breakDatasetMode={breakDatasetMode}
+              onBreakDatasetPoint={handleBreakDatasetPoint}
               onBreakDatasetSegment={handleBreakDatasetSegment}
               onSeedColor={(rgb) => setSeedColor((current) => current.every((channel, index) => channel === rgb[index]) ? current : rgb)}
               onCropSelection={(rect) => { void cropImage(rect) }}
@@ -2586,7 +2609,7 @@ export default function App() {
               onTraceRegion={tracePaintedRegion} />
             {!imageUrl && <button className="upload-overlay" onClick={() => imageInput.current?.click()}><Upload size={15} /> Choose image</button>}
           </div>
-          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'break-dataset' ? ' · Click the line segment between two points to break it into two separate datasets.' : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Auto paint only marks regions; refine the paint, then use Get points to extract and learn from your edits.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point; use arrow keys right away to nudge (Shift moves 10 px).'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
+          <div className="mode-strip"><span className="mode-symbol"><MousePointer2 size={14} /></span><span className="mode-text"><strong>{pendingTrace ? 'Review points' : !imageUrl ? 'Upload image' : workflowStep === 'calibration' && calibrationPhase === 'values' ? 'Enter calibration values' : modeLabels[mode]}</strong>{pendingTrace ? ' · Compare the new curves, then confirm or discard them.' : !imageUrl ? ' · Paste or drop a plot image, or choose a file.' : mode === 'prep-heal' ? ' · Brush over one gap, then choose and review a connection.' : mode === 'prep-region' ? ' · Drag around the plot area, including its axes.' : mode === 'prep-erase' ? ' · Click or drag to erase the selected layer.' : mode === 'prep-draw' || mode === 'prep-line' ? ' · Drag over the image to edit the reconstruction.' : mode === 'grid-horizontal' || mode === 'grid-vertical' ? ' · Click adjacent grid lines on the original, then process again.' : mode === 'guide-axis-x' || mode === 'guide-axis-y' ? ' · Click the axis on the original, then process again.' : !imagePrepared ? ' · Process, compare and correct the reconstruction before confirming.' : workflowStep === 'calibration' && calibrationPhase === 'values' ? ' · Enter the actual values for the labeled markers.' : mode === 'calibrate-four' ? ` · Click ${(['X1', 'X2', 'Y1', 'Y2'][fourPointPixels.length] ?? 'the next reference point')} on the chart.` : mode === 'calibrate-intersections' ? ` · Click intersection ${fourPointPixels.length + 1}, corresponding to X${fourPointPixels.length + 1} and Y${fourPointPixels.length + 1}.` : mode === 'calibrate-edit' ? ' · Click or drag a calibration marker; arrow keys move 1 px, Shift + arrows 10 px.' : mode === 'break-dataset' ? (breakDatasetMode === 'point' ? ' · Click a point on a dataset to break there (both resulting datasets keep that point).' : ' · Click the line segment between two points to break it into two separate datasets.') : mode === 'point-edit' || mode === 'select' ? ' · Select a curve point, then drag or use arrow keys to fine-tune; Shift moves 10 px. In Modify mode, Delete removes the selected point.' : mode === 'trace-region' ? ' · Auto paint only marks regions; refine the paint, then use Get points to extract and learn from your edits.' : mode === 'speed' ? ' · Click a speed line, or use Paint curve region to guide it.' : mode === 'surge' || mode === 'choke' ? ' · Click sequentially along the compressor boundary.' : ' · Click to add a point; use arrow keys right away to nudge (Shift moves 10 px).'}</span><span className="mode-spacer" />{loading ? <span className="tracing-state"><span className="loader-dot" /> Tracing…</span> : !pendingTrace && workflowStep !== 'calibration' && <span className="keyboard-tip"><kbd>Esc</kbd> select · <kbd>M</kbd> modify</span>}</div>
           {showTable && workflowStep === 'digitize' && <div className="data-table-panel">
             <div className="data-table-head">
               <strong>{activeDataset?.name ?? 'Dataset'} · calibrated values</strong>
@@ -2748,6 +2771,21 @@ export default function App() {
               {activeDataset?.kind === 'measurement' && <div className="measurement-results"><div><span>Distance</span><strong>{measuredDistance === null ? 'Add two points' : calibrated ? measuredDistance.toPrecision(5) : `${measuredDistance.toFixed(1)} px`}</strong></div><div><span>Angle</span><strong>{measuredAngle === null ? 'Add 3 points' : `${measuredAngle.toFixed(2)}°`}</strong></div></div>}
               <button className="add-dataset-button" disabled={Boolean(pendingTrace)} onClick={() => addDataset()}><span>+</span> Add dataset</button>
             </section>
+            {mode === 'break-dataset' && <section className="panel-section extraction-section break-options-section">
+              <div className="section-heading">
+                <div><span className="section-kicker">BREAK DATASET</span><h2>Split mode</h2></div>
+                <Scissors size={16} />
+              </div>
+              <p className="section-copy">
+                {breakDatasetMode === 'point'
+                  ? 'Click an interior point on any curve. Both resulting datasets will include the selected break point.'
+                  : 'Click the line segment between two points to split into two datasets without sharing a point.'}
+              </p>
+              <div className="brush-tools" role="group" aria-label="Break dataset mode">
+                <button type="button" aria-pressed={breakDatasetMode === 'point'} onClick={() => setBreakDatasetMode('point')}>At point (shared)</button>
+                <button type="button" aria-pressed={breakDatasetMode === 'segment'} onClick={() => setBreakDatasetMode('segment')}>Between points</button>
+              </div>
+            </section>}
             {aiOptionsOpen && <section className="panel-section extraction-section ai-extraction-section">
               <div className="section-heading">
                 <div><span className="section-kicker">AI EXTRACTION</span><h2>Smart auto points</h2></div>
@@ -2815,7 +2853,7 @@ export default function App() {
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">CALIBRATION</span><h2>Marker appearance</h2></div></div><p className="section-copy">The selected calibration point uses this color. Confirmed calibration hides the markers.</p><label className="format-control"><span>Selected marker color</span><input aria-label="Selected calibration marker color" type="color" value={calibrationMarkerColor} onChange={(event) => setCalibrationMarkerColor(event.target.value)} /></label></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">IMAGE TOOLS</span><h2>Pre-processing</h2></div></div><p className="section-copy">Apply transforms to the source image before digitizing.</p><div className="settings-transform"><button onClick={() => void applyImageTransform('rotate-left')}><RotateCcw size={15} /> Rotate left</button><button onClick={() => void applyImageTransform('rotate-right')}><RotateCw size={15} /> Rotate right</button><button onClick={() => void applyImageTransform('flip-x')}><FlipHorizontal size={15} /> Flip horizontal</button><button onClick={() => void applyImageTransform('flip-y')}><FlipVertical size={15} /> Flip vertical</button></div></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PROJECT</span><h2>Export & restore</h2></div></div><p className="section-copy">Project files include the source image, calibration and all datasets.</p><button className="settings-action" disabled={projectBusy} onClick={() => { startNewProject() }}><FilePlus2 size={15} /> New project</button><button className="settings-action" onClick={() => void exportProject()}><ArrowDownToLine size={15} /> Save editable project</button><button className="settings-action" onClick={() => projectInput.current?.click()}><FolderOpen size={15} /> Open project file</button><button className="settings-action" onClick={exportAllJson}><FileJson2 size={15} /> Export all datasets as JSON</button><button className="settings-action settings-danger" disabled={projectBusy} onClick={requestDeleteProject}><Trash2 size={15} /> Delete project</button></section>
-            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">DIGITIZING</span><h2>Manual point editing</h2></div></div><p className="section-copy">By default, manually added points are inserted between their nearest X neighbors instead of appended to the end of the dataset.</p><label className="format-control"><span>Insert manual points between X neighbors</span><input aria-label="Settings insert manual points between X neighbors" type="checkbox" checked={insertPointsByX} onChange={(event) => setInsertPointsByX(event.target.checked)} /></label><p className="section-copy">Snap-to-curve search radius: {Math.round(interactionModel.snapRadius)} px (adapts from manual drags &amp; snaps).</p></section>
+            <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">DIGITIZING</span><h2>Manual point editing</h2></div></div><p className="section-copy">By default, manually added points are inserted between their nearest X neighbors instead of appended to the end of the dataset.</p><label className="format-control"><span>Insert manual points between X neighbors</span><input aria-label="Settings insert manual points between X neighbors" type="checkbox" checked={insertPointsByX} onChange={(event) => setInsertPointsByX(event.target.checked)} /></label><label className="format-control"><span>Break dataset mode</span><select aria-label="Break dataset mode" value={breakDatasetMode} onChange={(event) => setBreakDatasetMode(event.target.value === 'segment' ? 'segment' : 'point')}><option value="point">At point (shared)</option><option value="segment">Between points</option></select></label><p className="section-copy">Snap-to-curve search radius: {Math.round(interactionModel.snapRadius)} px (adapts from manual drags &amp; snaps).</p></section>
             <section className="panel-section"><div className="section-heading"><div><span className="section-kicker">PRIVACY</span><h2>{onlineConfiguration.config ? 'Shared learning' : 'Local learning'}</h2></div></div>
               <p className="section-copy">{onlineConfiguration.config ? 'Learning syncs bounded numeric model updates (curve, point-spacing, and interaction AI) to Supabase, never images or raw coordinates. Updates are queued offline in IndexedDB and synced automatically.' : 'Learning stores numeric models and interaction preferences locally in IndexedDB, not training images.'} Grid edits do not train the curve model. Review every result; Undo does not undo learning.</p>
               {learningError ? <p className="section-copy" role="alert">Storage unavailable: {learningError}. Restart the app to retry.</p> : learningState ? <>
@@ -2871,12 +2909,19 @@ export default function App() {
       />
       {(() => {
         const target = breakCandidate ? datasets.find((dataset) => dataset.id === breakCandidate.datasetId) : null
+        const firstCount = breakCandidate ? breakCandidate.index + 1 : 0
+        const secondCount = target && breakCandidate
+          ? breakCandidate.kind === 'point'
+            ? target.points.length - breakCandidate.index
+            : target.points.length - (breakCandidate.index + 1)
+          : 0
         return (
           <BreakDatasetDialog
             open={Boolean(target && breakCandidate)}
             sourceName={target?.name ?? ''}
-            firstCount={breakCandidate ? breakCandidate.segmentIndex + 1 : 0}
-            secondCount={target && breakCandidate ? target.points.length - (breakCandidate.segmentIndex + 1) : 0}
+            sharedPointNumber={breakCandidate?.kind === 'point' ? breakCandidate.index + 1 : undefined}
+            firstCount={firstCount}
+            secondCount={secondCount}
             firstColor={target?.color ?? '#2dd4bf'}
             secondColor={breakCandidate?.secondColor ?? '#60a5fa'}
             defaultFirstName={target?.name ?? ''}

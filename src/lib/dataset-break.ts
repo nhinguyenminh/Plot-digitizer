@@ -1,5 +1,7 @@
 import type { Dataset, PixelPoint } from './digitizer'
 
+export type DatasetBreakMode = 'point' | 'segment'
+
 export interface DatasetSegmentHit {
   datasetId: string
   segmentIndex: number
@@ -7,6 +9,13 @@ export interface DatasetSegmentHit {
   start: PixelPoint
   end: PixelPoint
   closest: PixelPoint
+}
+
+export interface DatasetPointHit {
+  datasetId: string
+  pointIndex: number
+  distance: number
+  point: PixelPoint
 }
 
 export function pointToSegmentProjection(point: PixelPoint, start: PixelPoint, end: PixelPoint) {
@@ -18,6 +27,35 @@ export function pointToSegmentProjection(point: PixelPoint, start: PixelPoint, e
     : 0
   const closest = { x: start.x + t * dx, y: start.y + t * dy }
   return { closest, distance: Math.hypot(point.x - closest.x, point.y - closest.y), t }
+}
+
+export function findNearestBreakPoint(
+  datasets: Dataset[],
+  point: PixelPoint,
+  maxDistance: number,
+  preferredDatasetId?: string,
+): DatasetPointHit | null {
+  let best: DatasetPointHit | null = null
+  for (const dataset of datasets) {
+    if (dataset.points.length < 3) continue
+    for (let index = 1; index < dataset.points.length - 1; index++) {
+      const candidate = dataset.points[index]
+      const distance = Math.hypot(point.x - candidate.x, point.y - candidate.y)
+      if (distance > maxDistance) continue
+      const isBetter = !best
+        || distance < best.distance - 1.5
+        || (Math.abs(distance - best.distance) <= 1.5
+          && dataset.id === preferredDatasetId
+          && best.datasetId !== preferredDatasetId)
+        || (Math.abs(distance - best.distance) <= 1.5
+          && (dataset.id === preferredDatasetId) === (best.datasetId === preferredDatasetId)
+          && distance < best.distance)
+      if (isBetter) {
+        best = { datasetId: dataset.id, pointIndex: index, distance, point: candidate }
+      }
+    }
+  }
+  return best
 }
 
 export function findNearestDatasetSegment(
@@ -56,6 +94,39 @@ export function suggestSplitDatasetName(baseName: string, existingDatasets: Data
   let suffix = 2
   while (used.has(`${trimmed} (${suffix})`.toLowerCase())) suffix++
   return `${trimmed} (${suffix})`
+}
+
+export function breakDatasetAtPoint(
+  dataset: Dataset,
+  pointIndex: number,
+  options: {
+    firstName?: string
+    secondName?: string
+    secondColor: string
+    secondId?: string
+  },
+): [Dataset, Dataset] {
+  if (dataset.points.length < 3) {
+    throw new Error('A dataset needs at least three points to break at an interior point.')
+  }
+  if (!Number.isInteger(pointIndex) || pointIndex < 1 || pointIndex > dataset.points.length - 2) {
+    throw new Error('Select an interior point between the first and last point to break.')
+  }
+  const firstName = options.firstName?.trim() || dataset.name
+  const secondName = options.secondName?.trim() || `${dataset.name} (2)`
+  const first: Dataset = {
+    ...dataset,
+    name: firstName,
+    points: dataset.points.slice(0, pointIndex + 1).map((point) => ({ ...point })),
+  }
+  const second: Dataset = {
+    ...dataset,
+    id: options.secondId ?? crypto.randomUUID(),
+    name: secondName,
+    color: options.secondColor,
+    points: dataset.points.slice(pointIndex).map((point) => ({ ...point })),
+  }
+  return [first, second]
 }
 
 export function breakDatasetAtSegment(
